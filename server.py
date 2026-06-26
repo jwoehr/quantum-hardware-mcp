@@ -45,9 +45,8 @@ from qiskit_ibm_runtime import EstimatorV2 as Estimator
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from qiskit_ibm_runtime import QiskitRuntimeService
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse as _JSONResponse
 from starlette.responses import JSONResponse
-from starlette.requests import Request
 
 # --------------------------------------------------------------------------
 # Load .env from the same folder as this file, regardless of working directory.
@@ -1647,37 +1646,46 @@ def debug_circuit(qasm_string: str, device_name: str = "",
 # API Key Authentication Middleware
 # --------------------------------------------------------------------------
 
-class APIKeyAuthMiddleware(BaseHTTPMiddleware):
+class APIKeyAuthMiddleware:
     """
-    Middleware to validate API key for HTTP requests.
-    
-    If MCP_API_KEY environment variable is set, all requests must include
-    a matching X-API-Key header. If not set, all requests are allowed
-    (development mode).
+    Pure ASGI middleware for API key auth.
+
+    Replaces BaseHTTPMiddleware to avoid Starlette 1.3.x SSE breakage —
+    BaseHTTPMiddleware wraps SSE responses in a buffer that causes an
+    AssertionError when the SSE stream sends http.response.start twice.
+    A raw ASGI __call__ passes the connection straight through.
     """
-    
+
     def __init__(self, app, api_key: Optional[str] = None):
-        super().__init__(app)
+        self.app = app
         self.api_key = api_key or os.getenv("MCP_API_KEY")
-    
-    async def dispatch(self, request: Request, call_next):
-        # If no API key is configured, allow all requests (development mode)
+
+    async def __call__(self, scope, receive, send):
+        # Only inspect HTTP/WebSocket — pass lifespan events straight through
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
         if not self.api_key:
-            return await call_next(request)
-        
-        # Check for API key in request headers (case-insensitive)
-        request_key = request.headers.get("X-API-Key") or request.headers.get("x-api-key")
-        
+            await self.app(scope, receive, send)
+            return
+
+        # Headers arrive as a list of (name_bytes, value_bytes) tuples
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        request_key = headers.get(b"x-api-key", b"").decode()
+
         if request_key != self.api_key:
-            return JSONResponse(
+            response = _JSONResponse(
                 status_code=401,
                 content={
                     "error": "Unauthorized",
-                    "message": "Invalid or missing API key. Include X-API-Key header with your request.",
-                }
+                    "message": "Invalid or missing API key. Include X-API-Key header.",
+                },
             )
-        
-        return await call_next(request)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 # --------------------------------------------------------------------------
