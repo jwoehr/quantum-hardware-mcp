@@ -186,9 +186,20 @@ async function saveChatToFile(filePath) {
  * @param {number} intervalSecs - seconds between each poll (default 10)
  */
 async function pollJob(provider, jobId, intervalSecs) {
-    const providerName = provider.toUpperCase() === 'IONQ' ? 'IonQ' : 'IBM';
-    const statusTool  = providerName === 'IonQ' ? 'ionq_job_status'  : 'job_status';
-    const resultTool  = providerName === 'IonQ' ? 'ionq_job_results' : 'job_results';
+    let providerName, statusTool, resultTool;
+    switch (provider.toUpperCase()) {
+        case 'IONQ':
+            providerName = 'IonQ';
+            statusTool   = 'ionq_job_status';
+            resultTool   = 'ionq_job_results';
+            break;
+        case 'IBM':
+        default:
+            providerName = 'IBM';
+            statusTool   = 'job_status';
+            resultTool   = 'job_results';
+            break;
+    }
 
     console.log(`\n🔄 Polling ${providerName} job ${jobId} every ${intervalSecs}s`);
     console.log('   Press any key to abort.\n');
