@@ -130,9 +130,11 @@ _init_db()
 
 def _get_service() -> QiskitRuntimeService:
     """
-    Build a QiskitRuntimeService from the token stored in .env.
-    Raises a clear error if the token is missing so the user knows exactly
-    what to fix.
+    Build a QiskitRuntimeService from env vars.
+
+    Required: IBM_QUANTUM_TOKEN
+    Optional: IBM_CHANNEL  (default: ibm_quantum_platform)
+              IBM_INSTANCE (e.g. ibm-q/open/main — falls back to IBM auto-select)
     """
     token = os.getenv("IBM_QUANTUM_TOKEN")
     if not token:
@@ -142,8 +144,14 @@ def _get_service() -> QiskitRuntimeService:
             "  IBM_QUANTUM_TOKEN=your_token_here\n"
             "Get your token at https://quantum.ibm.com/account"
         )
-    # channel="ibm_quantum_platform" → renamed in qiskit-ibm-runtime ≥ 0.40
-    return QiskitRuntimeService(channel="ibm_quantum_platform", token=token)
+    channel  = os.getenv("IBM_CHANNEL", "ibm_quantum_platform")
+    instance = os.getenv("IBM_INSTANCE")  # None → IBM picks the default
+
+    kwargs = dict(channel=channel, token=token)
+    if instance:
+        kwargs["instance"] = instance
+
+    return QiskitRuntimeService(**kwargs)
 
 
 def _cx_errors_for_backend(props) -> list[float]:
@@ -1976,7 +1984,15 @@ if __name__ == "__main__":
         print(f"Server URL:    http://{args.host}:{args.port}", flush=True)
         print(f"CORS Origins:  {args.cors_origins}", flush=True)
         print(f"Authentication: {'Enabled (API key required)' if api_key_configured else 'Disabled (development mode)'}", flush=True)
-        
+
+        # Show IBM account info in banner only if IBM_SHOW_ACCOUNT_INFO is not "false".
+        # Default is to show it — set IBM_SHOW_ACCOUNT_INFO=false in .env to hide.
+        if os.getenv("IBM_SHOW_ACCOUNT_INFO", "true").lower() != "false":
+            ibm_channel  = os.getenv("IBM_CHANNEL", "ibm_quantum_platform")
+            ibm_instance = os.getenv("IBM_INSTANCE", "(auto-select)")
+            print(f"IBM Channel:   {ibm_channel}", flush=True)
+            print(f"IBM Instance:  {ibm_instance}", flush=True)
+
         if not api_key_configured:
             print("\n⚠️  WARNING: No API key configured!", flush=True)
             print("   Set MCP_API_KEY environment variable for production use.", flush=True)
