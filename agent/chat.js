@@ -203,7 +203,7 @@ async function pollJob(provider, jobId, intervalSecs) {
     // Prompt sent to the agent on each poll iteration
     const pollPrompt =
         `Use the ${statusTool} tool to check the status of ${providerName} job id ${jobId}. ` +
-        `If the status is DONE, also call ${resultTool} and interpret the measurement counts for the user. ` +
+        `If the status is DONE, also call ${resultTool} and return the COMPLETE raw measurement counts plus your interpretation. ` +
         `If the job is not done yet, your final answer is the current job status only — do not guess results.`;
 
     while (!aborted) {
