@@ -20,6 +20,10 @@ Tools:
   - estimate_expectation  : run Estimator primitive to compute observable expectation values
   - circuit_report        : dry-run analysis — fidelity estimate, gate counts, qubit map
   - debug_circuit         : bug detector — finds errors before you waste queue time
+  - ionq_devices          : list IonQ quantum computers and simulators
+  - ionq_submit_job       : submit an OpenQASM 2 circuit to IonQ hardware or simulator
+  - ionq_job_status       : check the status of a submitted IonQ job
+  - ionq_job_results      : retrieve measurement counts from a completed IonQ job
 """
 
 import os
@@ -1674,6 +1678,202 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
             )
         
         return await call_next(request)
+
+
+# --------------------------------------------------------------------------
+# Tool 17: ionq_devices  — list IonQ quantum computers
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def ionq_devices() -> str:
+    """
+    List all available IonQ quantum computers and simulators.
+
+    IonQ uses trapped-ion technology — a different physical approach from
+    IBM's superconducting qubits. Trapped-ion systems tend to have higher
+    gate fidelity but fewer qubits than IBM machines.
+
+    Returns a list of IonQ backends with qubit count and availability.
+    Requires IONQ_API_KEY in .env.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return json.dumps({
+            "error": "IONQ_API_KEY not set in .env",
+            "hint": "Get your key at cloud.ionq.com and add IONQ_API_KEY=your_key to .env"
+        })
+
+    try:
+        from qiskit_ionq import IonQProvider
+        provider = IonQProvider(api_key)
+        backends = provider.backends()
+
+        result = []
+        for b in backends:
+            available = b.status()
+            result.append({
+                "name": b.name,
+                "num_qubits": b.num_qubits,
+                "available": bool(available),
+                "type": "simulator" if "simulator" in b.name else "hardware",
+                "provider": "IonQ",
+                "technology": "trapped-ion",
+            })
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+# --------------------------------------------------------------------------
+# Tool 18: ionq_submit_job  — submit a circuit to IonQ
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def ionq_submit_job(
+    backend_name: str,
+    qasm_string: str,
+    shots: int = 1024,
+) -> str:
+    """
+    Compile and submit an OpenQASM 2 circuit to an IonQ quantum computer.
+
+    IonQ's trapped-ion hardware is great for circuits needing high fidelity
+    on a small number of qubits. Use ionq_devices() first to see which
+    backends are available.
+
+    Args:
+        backend_name : IonQ backend to use — e.g. 'ionq_simulator' or 'ionq_qpu'
+        qasm_string  : OpenQASM 2.0 circuit string
+        shots        : number of times to run the circuit (default 1024)
+
+    Returns job_id, status, backend, and shots.
+    Requires IONQ_API_KEY in .env.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return json.dumps({
+            "error": "IONQ_API_KEY not set in .env",
+            "hint": "Get your key at cloud.ionq.com and add IONQ_API_KEY=your_key to .env"
+        })
+
+    try:
+        from qiskit_ionq import IonQProvider
+        from qiskit import QuantumCircuit as QC
+
+        # Parse the QASM string into a Qiskit circuit
+        try:
+            circuit = QC.from_qasm_str(qasm_string)
+        except Exception as parse_err:
+            return json.dumps({
+                "error": f"Failed to parse QASM: {parse_err}",
+                "hint": "IonQ supports OpenQASM 2.0 — make sure your circuit starts with: OPENQASM 2.0;"
+            })
+
+        provider = IonQProvider(api_key)
+        backend = provider.get_backend(backend_name)
+
+        # Submit the job
+        job = backend.run(circuit, shots=shots)
+
+        return json.dumps({
+            "job_id": job.job_id(),
+            "status": "SUBMITTED",
+            "backend": backend_name,
+            "shots": shots,
+            "provider": "IonQ",
+            "hint": "Use ionq_job_status(job_id) to check progress"
+        })
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+# --------------------------------------------------------------------------
+# Tool 19: ionq_job_status  — check IonQ job status
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def ionq_job_status(job_id: str, backend_name: str = "ionq_simulator") -> str:
+    """
+    Check the status of a submitted IonQ job.
+
+    Args:
+        job_id       : the job ID returned by ionq_submit_job
+        backend_name : the backend the job was submitted to (default: ionq_simulator)
+
+    Returns current status and job details.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "IONQ_API_KEY not set in .env"})
+
+    try:
+        from qiskit_ionq import IonQProvider
+        provider = IonQProvider(api_key)
+        backend = provider.get_backend(backend_name)
+        job = backend.retrieve_job(job_id)
+
+        status = job.status()
+
+        return json.dumps({
+            "job_id": job_id,
+            "status": str(status.name),
+            "backend": backend_name,
+            "provider": "IonQ",
+        })
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+# --------------------------------------------------------------------------
+# Tool 20: ionq_job_results  — get results from a completed IonQ job
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def ionq_job_results(job_id: str, backend_name: str = "ionq_simulator") -> str:
+    """
+    Retrieve measurement counts from a completed IonQ job.
+
+    Args:
+        job_id       : the job ID returned by ionq_submit_job
+        backend_name : the backend the job was submitted to (default: ionq_simulator)
+
+    Returns bit-string counts like {"00": 512, "11": 512}.
+    Job must be in DONE status — check with ionq_job_status() first.
+    """
+    api_key = os.getenv("IONQ_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "IONQ_API_KEY not set in .env"})
+
+    try:
+        from qiskit_ionq import IonQProvider
+        from qiskit.providers import JobStatus
+        provider = IonQProvider(api_key)
+        backend = provider.get_backend(backend_name)
+        job = backend.retrieve_job(job_id)
+
+        status = job.status()
+        if status != JobStatus.DONE:
+            return json.dumps({
+                "job_id": job_id,
+                "status": str(status.name),
+                "message": "Job not complete yet — check again with ionq_job_status()"
+            })
+
+        counts = job.result().get_counts()
+        return json.dumps({
+            "job_id": job_id,
+            "backend": backend_name,
+            "provider": "IonQ",
+            "counts": counts,
+            "total_shots": sum(counts.values()),
+        })
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 # --------------------------------------------------------------------------
