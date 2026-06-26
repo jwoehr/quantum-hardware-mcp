@@ -198,6 +198,16 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
     const myTools = toolsResponse.tools
         .map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
         .filter(toolFilter);
+
+    if (myTools.length === 0) {
+        process.stdout.write(JSON.stringify({
+            answer: 'No tools available for this provider. Check that the MCP server has the required tools loaded and any necessary API keys are set in the root .env file.',
+            metadata: { toolsAvailable: [] }
+        }));
+        await mcpClient.close();
+        process.exit(0);
+    }
+
     const formattedTools = JSON.stringify(myTools, null, 2);
 
     // 4. Set up LLM provider

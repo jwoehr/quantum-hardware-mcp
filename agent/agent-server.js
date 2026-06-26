@@ -107,12 +107,16 @@ function callSubagent(provider, question, history, logger) {
         child.on('close', code => {
             if (stderr) logger.log(`[${provider} subagent stderr] ${stderr.trim()}`);
 
-            try {
-                const result = JSON.parse(stdout);
-                resolve(result);
-            } catch {
-                reject(new Error(`${provider} subagent returned invalid JSON: ${stdout.substring(0, 200)}`));
+            // Extract JSON robustly — ignore any stray text before/after the object
+            const start = stdout.indexOf('{');
+            const end   = stdout.lastIndexOf('}');
+            if (start !== -1 && end > start) {
+                try {
+                    resolve(JSON.parse(stdout.substring(start, end + 1)));
+                    return;
+                } catch { /* fall through to error */ }
             }
+            reject(new Error(`${provider} subagent returned invalid JSON (exit ${code}): ${stdout.substring(0, 300)}`));
         });
 
         child.on('error', err => reject(new Error(`Failed to spawn ${provider} subagent: ${err.message}`)));
