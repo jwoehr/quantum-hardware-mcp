@@ -162,6 +162,21 @@ function standardizeHistoryEntry(entry) {
 }
 
 /**
+ * Saves the current chat history to a Markdown file
+ * @param {string} filePath - Destination file path (relative or absolute)
+ */
+async function saveChatToFile(filePath) {
+    const resolvedPath = path.resolve(process.cwd(), filePath);
+    const lines = chatHistory.map(entry => {
+        const heading = entry.role === 'user' ? '## User' : '## Assistant';
+        return `${heading}\n\n${entry.content}`;
+    });
+    const markdown = lines.join('\n\n---\n\n') + '\n';
+    await fs.writeFile(resolvedPath, markdown, 'utf-8');
+    console.log(`\n✅ Chat saved to: ${resolvedPath}\n`);
+}
+
+/**
  * Polls a quantum job at regular intervals until complete or aborted by keypress.
  * Implements Jack's spec: chat tells the agent to check the job; agent uses
  * job_status / ionq_job_status tools and returns results when done.
@@ -261,6 +276,53 @@ function displayWelcome() {
  */
 async function processInput(input) {
     const trimmed = input.trim().toLowerCase();
+
+    // /save @/path/to/file  — save chat history to Markdown (Jack's feature, PR #14)
+    if (input.trim().startsWith('/save')) {
+        if (chatHistory.length === 0) {
+            console.log('\n⚠️  Nothing to save — chat history is empty.\n');
+            return true;
+        }
+
+        const parts = input.trim().split(/\s+/);
+        let filePath = parts[1] && parts[1].startsWith('@')
+            ? parts[1].slice(1).trim()
+            : null;
+
+        if (!filePath) {
+            filePath = await new Promise((resolve) => {
+                rl.question('\n💾 Save to file> ', (answer) => {
+                    resolve(answer.trim());
+                });
+            });
+            if (!filePath) {
+                console.log('\nSave cancelled.\n');
+                return true;
+            }
+        }
+
+        try {
+            await fs.stat(path.resolve(process.cwd(), filePath));
+            const confirm = await new Promise((resolve) => {
+                rl.question('\n⚠️  File exists. Overwrite? (y/N)> ', (answer) => {
+                    resolve(answer.trim());
+                });
+            });
+            if (confirm !== 'y' && confirm !== 'Y') {
+                console.log('\nSave cancelled.\n');
+                return true;
+            }
+        } catch (_) {
+            // File does not exist — proceed
+        }
+
+        try {
+            await saveChatToFile(filePath);
+        } catch (error) {
+            console.log(`\n❌ Could not save chat: ${error.message}\n`);
+        }
+        return true;
+    }
 
     // /poll <job_id> [interval]
     // /poll IBM <job_id> [interval]
