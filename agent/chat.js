@@ -7,6 +7,7 @@ require('dotenv').config();
 
 const AGENT_URL = process.env.QUANTUM_AGENT_URL || 'http://localhost:3021';
 const chatHistory = [];
+let noLocalMode = false; // toggled by /nolocal command
 
 // Create readline interface for user input
 const rl = readline.createInterface({
@@ -71,7 +72,8 @@ async function chat(question, resumeContext = null) {
     try {
         const requestBody = {
             question,
-            history: chatHistory
+            history: chatHistory,
+            noLocal: noLocalMode
         };
         
         // Add resume context if continuing from a query
@@ -270,6 +272,7 @@ function displayWelcome() {
     console.log('  - Type "/save @/path/to/file" to save chat history to a Markdown file');
     console.log('  - Type "/poll <job_id> [interval_secs]" to poll IBM job until done');
     console.log('  - Type "/poll IBM|IonQ <job_id> [interval_secs]" to specify provider');
+    console.log('  - Type "/nolocal" to toggle bypassing the local Qiskit code model');
     console.log('  - Type "/help" to see this message again');
     console.log('\nExamples:');
     console.log('  - "List available quantum backends"');
@@ -358,6 +361,13 @@ async function processInput(input) {
         }
 
         await pollJob(provider, jobId, intervalSecs);
+        return true;
+    }
+
+    // /nolocal — toggle bypass of local Qiskit code model
+    if (trimmed === '/nolocal') {
+        noLocalMode = !noLocalMode;
+        console.log(`\n${noLocalMode ? '⚡ Local Qiskit model BYPASSED' : '🧠 Local Qiskit model ENABLED'} — toggled for this session.\n`);
         return true;
     }
 

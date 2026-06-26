@@ -84,18 +84,18 @@ If unsure or the question mentions both, default to IBM.`;
  * Spawn a subagent process, send it the question via stdin,
  * and return its answer from stdout.
  */
-function callSubagent(provider, question, history, logger) {
+function callSubagent(provider, question, history, logger, noLocal = false) {
     return new Promise((resolve, reject) => {
         const scriptPath = SUBAGENTS[provider];
-        logger.log(`[Dispatcher] Spawning ${provider} subagent: ${scriptPath}`);
+        logger.log(`[Dispatcher] Spawning ${provider} subagent: ${scriptPath}${noLocal ? ' (local LLM bypassed)' : ''}`);
 
         const child = spawn('node', [scriptPath], {
             env: { ...process.env },
             stdio: ['pipe', 'pipe', 'pipe'],
         });
 
-        // Send question + history to subagent stdin
-        child.stdin.write(JSON.stringify({ question, history: history || [] }));
+        // Send question + history (+ noLocal flag) to subagent stdin
+        child.stdin.write(JSON.stringify({ question, history: history || [], noLocal }));
         child.stdin.end();
 
         let stdout = '';
@@ -125,7 +125,7 @@ function callSubagent(provider, question, history, logger) {
 
 // --- Chat Endpoint ---
 app.post('/chat', async (req, res) => {
-    const { question, history } = req.body;
+    const { question, history, noLocal } = req.body;
 
     if (!question) {
         return res.status(400).json({ status: 'error', answer: 'No question provided.' });
@@ -139,7 +139,7 @@ app.post('/chat', async (req, res) => {
         const provider = await llmLimiter(() => classifyProvider(question, req.logger));
 
         // 2. Spawn the appropriate subagent and get the answer
-        const result = await callSubagent(provider, question, history, req.logger);
+        const result = await callSubagent(provider, question, history, req.logger, !!noLocal);
 
         return res.json({
             status: 'complete',

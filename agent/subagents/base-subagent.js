@@ -161,9 +161,9 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
         process.stdin.on('end', resolve);
     });
 
-    let question, history;
+    let question, history, noLocal;
     try {
-        ({ question, history } = JSON.parse(raw));
+        ({ question, history, noLocal } = JSON.parse(raw));
     } catch (err) {
         process.stdout.write(JSON.stringify({ answer: `Subagent parse error: ${err.message}`, metadata: {} }));
         process.exit(1);
@@ -226,7 +226,8 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
     // 5. Run ReAct loop
     let answer;
     try {
-        answer = await runReAct(llmProvider, chat, question, formattedTools, mcpClient, systemPrompt, qiskitEnabled);
+        // noLocal flag from dispatcher overrides qiskitEnabled for this request
+        answer = await runReAct(llmProvider, chat, question, formattedTools, mcpClient, systemPrompt, qiskitEnabled && !noLocal);
     } catch (err) {
         answer = `Subagent error: ${err.message}`;
     }
