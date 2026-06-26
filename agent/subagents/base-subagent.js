@@ -1,3 +1,11 @@
+// Redirect ALL console output to stderr immediately.
+// Subagents communicate with the dispatcher via stdout/stdin JSON.
+// Any stray console.log (from dotenv, provider factories, etc.) would
+// corrupt the JSON stream and break JSON.parse() in the dispatcher.
+console.log   = (...a) => process.stderr.write(a.map(String).join(' ') + '\n');
+console.warn  = (...a) => process.stderr.write(a.map(String).join(' ') + '\n');
+console.error = (...a) => process.stderr.write(a.map(String).join(' ') + '\n');
+
 /**
  * Base subagent — shared ReAct logic for IBM and IonQ subagents.
  *
