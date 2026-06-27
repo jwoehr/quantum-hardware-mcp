@@ -1,6 +1,6 @@
 # Quantum Hardware MCP Server
 
-An open-source MCP server that gives AI assistants live access to real quantum computers — IBM Quantum and IonQ. Ask natural questions, submit circuits, compare hardware, and get results. No dashboard. No manual API calls.
+An open-source MCP server that gives AI assistants live access to real quantum computers  IBM Quantum and IonQ. Ask natural questions, submit circuits, compare hardware, and get results. No dashboard. No manual API calls.
 
 Built with [FastMCP](https://github.com/jlowin/fastmcp), [qiskit-ibm-runtime](https://github.com/Qiskit/qiskit-ibm-runtime), and [qiskit-ionq](https://github.com/Qiskit-Partners/qiskit-ionq).
 
