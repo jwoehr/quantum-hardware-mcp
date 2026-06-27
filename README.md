@@ -218,6 +218,8 @@ Not locked into any provider:
 | OpenAI | Paid | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
 | vLLM | Self-hosted | `LLM_PROVIDER=vllm` + `VLLM_BASE_URL` |
 
+> **Privacy note:** For sensitive research — pharmaceutical, government, or unpublished academic work — run fully offline with Ollama. Zero data leaves your machine. The LLM runs locally, and the MCP server only contacts IBM/IonQ when you explicitly submit a job.
+
 ---
 
 ## Connect to Claude Desktop
