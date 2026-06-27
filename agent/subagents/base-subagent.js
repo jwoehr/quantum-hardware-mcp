@@ -119,12 +119,17 @@ Respond with ONLY one valid JSON object:
             finalAnswer = action.finalAnswer || action.answer || textResponse;
             break;
 
-        } else if (action.action === 'model_call' && qiskitEnabled && QISKIT_CODE_MODEL) {
-            try {
-                const modelResponse = await callQiskitModel(action.prompt);
-                currentPrompt = `Qiskit model responded:\n${modelResponse}\n\nDecide next — respond with ONLY valid JSON.`;
-            } catch (err) {
-                currentPrompt = `Qiskit model failed: ${err.message}\n\nFall back to tools or answer directly. Respond with ONLY valid JSON.`;
+        } else if (action.action === 'model_call') {
+            if (qiskitEnabled && QISKIT_CODE_MODEL) {
+                try {
+                    const modelResponse = await callQiskitModel(action.prompt);
+                    currentPrompt = `Qiskit model responded:\n${modelResponse}\n\nDecide next — respond with ONLY valid JSON.`;
+                } catch (err) {
+                    currentPrompt = `Qiskit model failed: ${err.message}\n\nFall back to tools or answer directly. Respond with ONLY valid JSON.`;
+                }
+            } else {
+                // Local model bypassed — answer the code question directly
+                currentPrompt = `Local Qiskit model is disabled. Answer this code question yourself using your own knowledge: ${action.prompt}\n\nRespond with ONLY valid JSON {"action":"answer","finalAnswer":"..."}`;
             }
 
         } else if (action.action === 'tool' || action.toolName) {
