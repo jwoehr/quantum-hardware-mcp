@@ -2008,6 +2008,16 @@ if __name__ == "__main__":
             starlette_app = mcp.sse_app()
             starlette_app.add_middleware(APIKeyAuthMiddleware, api_key=api_key)
 
+            # Wire CORS — the --cors-origins arg was parsed but never applied before
+            from starlette.middleware.cors import CORSMiddleware
+            origins = [o.strip() for o in args.cors_origins.split(',') if o.strip()]
+            starlette_app.add_middleware(
+                CORSMiddleware,
+                allow_origins=origins,
+                allow_methods=["GET", "POST"],
+                allow_headers=["Content-Type", "X-API-Key"],
+            )
+
             # The MCP SDK (transport_security.py) validates the Host header against
             # the pattern "localhost:*" — it accepts any "localhost:PORT" but NOT
             # bare "localhost". In Docker the agent uses "mcp-server:3020" as the
