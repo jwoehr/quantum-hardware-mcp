@@ -9,6 +9,10 @@ services:
     environment:
       - IBM_QUANTUM_TOKEN=${IBM_QUANTUM_TOKEN}
       - MCP_API_KEY=${MCP_API_KEY:-}
+      - IONQ_API_KEY=${IONQ_API_KEY:-}
+      - IBM_CHANNEL=${IBM_CHANNEL:-ibm_quantum_platform}
+      - IBM_INSTANCE=${IBM_INSTANCE:-}
+      - IBM_SHOW_ACCOUNT_INFO=${IBM_SHOW_ACCOUNT_INFO:-true}
     volumes:
       # Persist the SQLite snapshot database across container restarts
       - mcp-data:/app/data
