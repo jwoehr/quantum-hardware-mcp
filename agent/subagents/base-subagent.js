@@ -78,6 +78,11 @@ async function runReAct(llmProvider, chat, question, formattedTools, mcpClient, 
         ? `You have a Qiskit specialist model (${QISKIT_CODE_MODEL}) for quantum code questions. Use "model_call" action for any code request.`
         : '';
 
+    // Only offer model_call as an option when the local model is actually available
+    const modelCallLine = qiskitEnabled && QISKIT_CODE_MODEL
+        ? '- Call Qiskit model:   { "action": "model_call", "prompt": "<question>" }'
+        : '';
+
     let currentPrompt = `${systemPrompt}
 
 Available tools:
@@ -89,7 +94,7 @@ User request: "${question}"
 
 Respond with ONLY one valid JSON object:
 - Use a tool:          { "action": "tool", "toolName": "<name>", "toolArguments": {<args>} }
-- Call Qiskit model:   { "action": "model_call", "prompt": "<question>" }
+${modelCallLine}
 - Give final answer:   { "action": "answer", "finalAnswer": "<text>" }`;
 
     while (iterations < maxIterations) {
