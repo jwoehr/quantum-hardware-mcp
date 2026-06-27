@@ -47,9 +47,15 @@ async function callQiskitModel(prompt) {
     return response.message.content;
 }
 
-// Call an MCP tool and return parsed result
+const MCP_TOOL_TIMEOUT_MS = parseInt(process.env.MCP_TOOL_TIMEOUT_MS || '60000');
+
+// Call an MCP tool and return parsed result, with timeout
 async function callTool(mcpClient, toolName, toolArguments) {
-    const result = await mcpClient.callTool({ name: toolName, arguments: toolArguments });
+    const callPromise = mcpClient.callTool({ name: toolName, arguments: toolArguments });
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Tool "${toolName}" timed out after ${MCP_TOOL_TIMEOUT_MS}ms`)), MCP_TOOL_TIMEOUT_MS)
+    );
+    const result = await Promise.race([callPromise, timeoutPromise]);
     if (result.content && Array.isArray(result.content)) {
         const text = result.content.filter(i => i.type === 'text').map(i => i.text).join('\n');
         try { return JSON.parse(text); } catch { return { text }; }
@@ -175,7 +181,7 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
     try {
         ({ question, history, noLocal } = JSON.parse(raw));
     } catch (err) {
-        process.stdout.write(JSON.stringify({ answer: `Subagent parse error: ${err.message}`, metadata: {} }));
+        process.stdout.write('__RESULT__\n' + JSON.stringify({ answer: `Subagent parse error: ${err.message}`, metadata: {} }));
         process.exit(1);
     }
 
@@ -184,7 +190,7 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
     const mcpApiKey    = process.env.MCP_API_KEY;
 
     if (!mcpServerUri) {
-        process.stdout.write(JSON.stringify({ answer: 'QUANTUM_MCP_SERVER_URI not set', metadata: {} }));
+        process.stdout.write('__RESULT__\n' + JSON.stringify({ answer: 'QUANTUM_MCP_SERVER_URI not set', metadata: {} }));
         process.exit(1);
     }
 
@@ -199,18 +205,29 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
         await mcpClient.connect(transport);
         await new Promise(resolve => setTimeout(resolve, 100)); // handshake settle
     } catch (err) {
-        process.stdout.write(JSON.stringify({ answer: `MCP connection failed: ${err.message}`, metadata: {} }));
+        process.stdout.write('__RESULT__\n' + JSON.stringify({ answer: `MCP connection failed: ${err.message}`, metadata: {} }));
         process.exit(1);
     }
 
     // 3. Filter tools to only this subagent's domain
-    const toolsResponse = await mcpClient.listTools();
+    let toolsResponse;
+    try {
+        const listPromise = mcpClient.listTools();
+        const listTimeout = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('listTools timed out after 30s')), 30000)
+        );
+        toolsResponse = await Promise.race([listPromise, listTimeout]);
+    } catch (err) {
+        process.stdout.write('__RESULT__\n' + JSON.stringify({ answer: `MCP listTools failed: ${err.message}`, metadata: {} }));
+        await mcpClient.close();
+        process.exit(1);
+    }
     const myTools = toolsResponse.tools
         .map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
         .filter(toolFilter);
 
     if (myTools.length === 0) {
-        process.stdout.write(JSON.stringify({
+        process.stdout.write('__RESULT__\n' + JSON.stringify({
             answer: 'No tools available for this provider. Check that the MCP server has the required tools loaded and any necessary API keys are set in the root .env file.',
             metadata: { toolsAvailable: [] }
         }));
@@ -228,7 +245,7 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
         const stdHistory = llmProvider.standardizeHistory(history || []);
         chat = await llmProvider.createChat(stdHistory);
     } catch (err) {
-        process.stdout.write(JSON.stringify({ answer: `LLM setup failed: ${err.message}`, metadata: {} }));
+        process.stdout.write('__RESULT__\n' + JSON.stringify({ answer: `LLM setup failed: ${err.message}`, metadata: {} }));
         await mcpClient.close();
         process.exit(1);
     }
@@ -242,8 +259,10 @@ async function runSubagent(toolFilter, systemPrompt, qiskitEnabled = false) {
         answer = `Subagent error: ${err.message}`;
     }
 
-    // 6. Send result back to dispatcher via stdout
-    process.stdout.write(JSON.stringify({
+    // 6. Send result back to dispatcher via stdout using sentinel protocol
+    // Sentinel ensures the dispatcher can extract the JSON even when the
+    // LLM response contains curly braces inside code blocks.
+    process.stdout.write('__RESULT__\n' + JSON.stringify({
         answer,
         metadata: { toolsAvailable: myTools.map(t => t.name) }
     }));

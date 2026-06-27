@@ -39,7 +39,7 @@ app.use(express.json());
 app.use(cors());
 app.use(requestLoggerMiddleware);
 
-let llmProvider;
+let llmProvider = null;
 
 // Subagent script paths
 const SUBAGENTS = {
@@ -83,8 +83,14 @@ If unsure or the question mentions both, default to IBM.`;
 /**
  * Spawn a subagent process, send it the question via stdin,
  * and return its answer from stdout.
+ *
+ * Protocol: subagent writes __RESULT__\n<json> to stdout so we can
+ * extract the result even when the LLM response contains curly braces
+ * inside code blocks (which broke the old indexOf/lastIndexOf approach).
  */
 function callSubagent(provider, question, history, logger, noLocal = false) {
+    const timeoutMs = parseInt(process.env.SUBAGENT_TIMEOUT_MS || '120000');
+
     return new Promise((resolve, reject) => {
         const scriptPath = SUBAGENTS[provider];
         logger.log(`[Dispatcher] Spawning ${provider} subagent: ${scriptPath}${noLocal ? ' (local LLM bypassed)' : ''}`);
@@ -93,6 +99,12 @@ function callSubagent(provider, question, history, logger, noLocal = false) {
             env: { ...process.env },
             stdio: ['pipe', 'pipe', 'pipe'],
         });
+
+        // Kill the subagent if it doesn't finish within the timeout
+        const timer = setTimeout(() => {
+            child.kill('SIGTERM');
+            reject(new Error(`${provider} subagent timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
 
         // Send question + history (+ noLocal flag) to subagent stdin
         child.stdin.write(JSON.stringify({ question, history: history || [], noLocal }));
@@ -105,9 +117,19 @@ function callSubagent(provider, question, history, logger, noLocal = false) {
         child.stderr.on('data', chunk => { stderr += chunk; });
 
         child.on('close', code => {
+            clearTimeout(timer);
             if (stderr) logger.log(`[${provider} subagent stderr] ${stderr.trim()}`);
 
-            // Extract JSON robustly — ignore any stray text before/after the object
+            // Primary: look for sentinel line written by subagent
+            const sentinelIdx = stdout.indexOf('__RESULT__\n');
+            if (sentinelIdx !== -1) {
+                try {
+                    resolve(JSON.parse(stdout.slice(sentinelIdx + '__RESULT__\n'.length).trim()));
+                    return;
+                } catch { /* fall through to legacy extraction */ }
+            }
+
+            // Fallback: extract first complete JSON object (legacy subagents)
             const start = stdout.indexOf('{');
             const end   = stdout.lastIndexOf('}');
             if (start !== -1 && end > start) {
@@ -119,20 +141,31 @@ function callSubagent(provider, question, history, logger, noLocal = false) {
             reject(new Error(`${provider} subagent returned invalid JSON (exit ${code}): ${stdout.substring(0, 300)}`));
         });
 
-        child.on('error', err => reject(new Error(`Failed to spawn ${provider} subagent: ${err.message}`)));
+        child.on('error', err => { clearTimeout(timer); reject(new Error(`Failed to spawn ${provider} subagent: ${err.message}`)); });
     });
 }
 
 // --- Chat Endpoint ---
 app.post('/chat', async (req, res) => {
-    const { question, history, noLocal } = req.body;
+    // Guard: provider not ready yet (startup race)
+    if (!llmProvider) {
+        return res.status(503).json({ status: 'error', answer: 'Server is still starting up — try again in a moment.' });
+    }
 
-    if (!question) {
+    // Input validation
+    const { question, history, noLocal } = req.body;
+    if (!question || typeof question !== 'string') {
         return res.status(400).json({ status: 'error', answer: 'No question provided.' });
+    }
+    if (question.length > 32768) {
+        return res.status(400).json({ status: 'error', answer: 'Question too long (max 32 KB).' });
+    }
+    if (history !== undefined && !Array.isArray(history)) {
+        return res.status(400).json({ status: 'error', answer: 'history must be an array.' });
     }
 
     try {
-        req.logger.log(`[Chat] Question: "${question}"`);
+        req.logger.log(`[Chat] Question received (${question.length} chars)`);
 
         // 1. Classify which provider to route to
         const llmLimiter = await getLLMLimiter(providerName);

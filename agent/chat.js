@@ -40,6 +40,10 @@ async function processFileReferences(input) {
         try {
             // Resolve relative paths from current working directory
             const resolvedPath = path.resolve(process.cwd(), filePath);
+            // Prevent reading files outside the working directory
+            if (!resolvedPath.startsWith(process.cwd())) {
+                throw new Error('Access denied: path is outside the working directory');
+            }
             const content = await fs.readFile(resolvedPath, 'utf-8');
             
             // Format the file content with clear delimiters
