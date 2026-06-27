@@ -88,7 +88,6 @@ Each subagent is an expert for its platform  IBM subagent only sees IBM tools, I
 | Tool | What it does |
 |------|-------------|
 | `ionq_devices` | List all IonQ quantum computers and simulators |
-| `ionq_device_details` | Specs for one IonQ device: qubit count, fidelity, connectivity |
 | `ionq_submit_job` | Submit an OpenQASM 2.0 circuit to IonQ hardware or simulator |
 | `ionq_job_status` | Check IonQ job status |
 | `ionq_job_results` | Retrieve measurement counts from a completed IonQ job |
@@ -122,6 +121,7 @@ This is the beginning of a systematic study of Singmaster's Conjecture — searc
 | `/nolocal` | Toggle bypass of the local Qiskit code model (granite/mistral) — useful when Ollama is slow or unavailable |
 | `/clear` | Clear chat history |
 | `/help` | Show all commands |
+| `/exit` or `/quit` | End the session |
 
 ---
 
