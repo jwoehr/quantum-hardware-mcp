@@ -4,7 +4,7 @@ An open-source MCP server that gives AI assistants live access to real quantum c
 
 Built with [FastMCP](https://github.com/jlowin/fastmcp), [qiskit-ibm-runtime](https://github.com/Qiskit/qiskit-ibm-runtime), and [qiskit-ionq](https://github.com/Qiskit-Partners/qiskit-ionq).
 
-Collaboration: [Jack Woehr](https://github.com/jwoehr) — IBM Quantum veteran, Qiskit contributor.
+Collaboration: [Jack Woehr](https://github.com/jwoehr)  IBM Quantum veteran, Qiskit contributor.
 
 ---
 
@@ -41,7 +41,7 @@ Dispatcher (agent-server.js)
             ↓ calls IonQ API → returns real data
 ```
 
-Each subagent is an expert for its platform — IBM subagent only sees IBM tools, IonQ subagent only sees IonQ tools. The dispatcher routes automatically based on your question.
+Each subagent is an expert for its platform  IBM subagent only sees IBM tools, IonQ subagent only sees IonQ tools. The dispatcher routes automatically based on your question.
 
 ---
 
