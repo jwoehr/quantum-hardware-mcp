@@ -1892,6 +1892,86 @@ def ionq_job_results(job_id: str, backend_name: str = "ionq_simulator") -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def get_alerts(device_name: str = "", days: int = 7) -> str:
+    """
+    Return calibration drift alerts for IBM Quantum devices.
+
+    The snapshot agent (runs every 6 hours) compares each new snapshot
+    against the previous one. When a device's avg_cx_error or
+    avg_readout_error rises by more than 20%, or a device goes offline,
+    an alert is written to the database.
+
+    This is what Nikita's problem was — ibm_boston wasn't recalibrated
+    and nobody knew until jobs were stuck for 5 hours. This catches it
+    at the next snapshot automatically.
+
+    Args:
+        device_name : filter to one device (e.g. "ibm_boston") — leave empty for all
+        days        : how many days back to look (default 7)
+
+    Returns a list of alerts with device name, alert type, values, and timestamp.
+    Alert types:
+        cx_error_spike     — 2-qubit gate error rose >20%
+        readout_error_spike — readout error rose >20%
+        went_offline        — device went from operational to offline
+    """
+    import sqlite3 as _sqlite3
+
+    db_path = os.path.join(os.path.dirname(__file__), "devices.db")
+    if not os.path.exists(db_path):
+        return json.dumps({"error": "No local database found. Run snapshot.py first."})
+
+    try:
+        with _sqlite3.connect(db_path) as con:
+            query = """
+                SELECT ts, device_name, alert_type, prev_value, curr_value, pct_change
+                FROM device_alerts
+                WHERE ts >= datetime('now', ? || ' days')
+            """
+            params: list = [f"-{max(1, int(days))}"]
+
+            if device_name:
+                query += " AND device_name = ?"
+                params.append(device_name)
+
+            query += " ORDER BY ts DESC LIMIT 200"
+
+            rows = con.execute(query, params).fetchall()
+
+        if not rows:
+            msg = f"No alerts in the last {days} day(s)"
+            if device_name:
+                msg += f" for {device_name}"
+            return json.dumps({"alerts": [], "message": msg})
+
+        alerts = []
+        for ts, name, alert_type, prev, curr, pct in rows:
+            entry = {
+                "ts": ts,
+                "device": name,
+                "type": alert_type,
+            }
+            if alert_type == "went_offline":
+                entry["message"] = f"{name} went offline"
+            else:
+                label = "cx_error" if "cx" in alert_type else "readout_error"
+                entry["message"] = (
+                    f"{name} {label} spiked {pct}% "
+                    f"(was {prev:.5f}, now {curr:.5f})"
+                )
+            alerts.append(entry)
+
+        return json.dumps({
+            "alerts": alerts,
+            "total": len(alerts),
+            "period_days": days,
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 # --------------------------------------------------------------------------
 # Command-Line Argument Parsing
 # --------------------------------------------------------------------------

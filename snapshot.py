@@ -52,6 +52,21 @@ def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_name_ts
             ON device_snapshots (name, ts)
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS device_alerts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts          TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                alert_type  TEXT NOT NULL,
+                prev_value  REAL,
+                curr_value  REAL,
+                pct_change  REAL
+            )
+        """)
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_alerts_device
+            ON device_alerts (device_name, ts)
+        """)
 
 
 def _save_snapshots(rows: list[dict]) -> None:
@@ -103,6 +118,60 @@ def _write_csv(rows: list[dict]) -> None:
                 "avg_cx_error":     r.get("avg_cx_error"),
                 "avg_readout_error": r.get("avg_readout_error"),
             })
+
+
+DRIFT_THRESHOLD = 0.20  # alert when a metric rises by more than 20%
+
+def _check_and_write_alerts(rows: list[dict], ts: str) -> int:
+    """Compare current snapshot against the previous one.
+    Write a device_alerts row whenever a metric spikes or a device goes offline.
+    Returns the number of alerts written.
+    """
+    alerts = []
+    with sqlite3.connect(DB_PATH) as con:
+        for row in rows:
+            name = row["name"]
+
+            # Fetch the most recent previous snapshot for this device
+            prev = con.execute("""
+                SELECT avg_cx_error, avg_readout_error, operational
+                FROM device_snapshots
+                WHERE name = ?
+                ORDER BY ts DESC
+                LIMIT 1
+            """, (name,)).fetchone()
+
+            if prev is None:
+                continue  # first ever snapshot for this device — nothing to compare
+
+            prev_cx, prev_readout, prev_op = prev
+
+            # Check avg_cx_error spike
+            curr_cx = row.get("avg_cx_error")
+            if prev_cx and curr_cx and prev_cx > 0:
+                pct = (curr_cx - prev_cx) / prev_cx
+                if pct > DRIFT_THRESHOLD:
+                    alerts.append((ts, name, "cx_error_spike", prev_cx, curr_cx, round(pct * 100, 1)))
+
+            # Check avg_readout_error spike
+            curr_ro = row.get("avg_readout_error")
+            if prev_readout and curr_ro and prev_readout > 0:
+                pct = (curr_ro - prev_readout) / prev_readout
+                if pct > DRIFT_THRESHOLD:
+                    alerts.append((ts, name, "readout_error_spike", prev_readout, curr_ro, round(pct * 100, 1)))
+
+            # Check device went offline
+            curr_op = int(row["operational"]) if row.get("operational") is not None else None
+            if prev_op == 1 and curr_op == 0:
+                alerts.append((ts, name, "went_offline", 1.0, 0.0, None))
+
+        if alerts:
+            con.executemany("""
+                INSERT INTO device_alerts (ts, device_name, alert_type, prev_value, curr_value, pct_change)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, alerts)
+
+    return len(alerts)
 
 
 def _two_qubit_errors(props) -> list[float]:
@@ -162,9 +231,12 @@ def collect() -> None:
               f"Wrote {len(rows)} rows to {CSV_PATH}")
     else:
         # Local: write SQLite — feeds device_history MCP tool and report.py
+        ts = datetime.now(timezone.utc).isoformat()
+        n_alerts = _check_and_write_alerts(rows, ts)
         _save_snapshots(rows)
         print(f"[{datetime.now(timezone.utc).isoformat()}] "
-              f"Saved {len(rows)} snapshots to {DB_PATH}")
+              f"Saved {len(rows)} snapshots to {DB_PATH}"
+              + (f" | {n_alerts} drift alert(s) written" if n_alerts else ""))
 
 
 if __name__ == "__main__":
