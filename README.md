@@ -94,20 +94,32 @@ Each subagent is an expert for its platform  IBM subagent only sees IBM tools, I
 
 ---
 
-## Real experiment: Pascal's Triangle on quantum hardware
+## Real experiments on quantum hardware
 
-We used this tool to run the same circuit on both IBM and IonQ and compare the noise.
+### Pascal's Triangle encoding (IBM ibm_kingston)
 
-**The circuit:** encode C(6,3) = 20 as the binary state `|10100⟩`, run 1000 shots, measure.
+Encode Pascal's Triangle values as binary quantum states and measure fidelity on real hardware.
 
-| | IBM ibm_kingston (real hardware) | IonQ (simulator) |
+| Circuit | IBM ibm_kingston | IonQ (simulator) |
 |---|---|---|
-| Correct answer `10100` | 942/1000 — **94.2%** | 1000/1000 — **100%** |
-| Noise | 5.8% (readout errors) | 0% (noiseless simulator) |
+| C(6,3) = 20 → `\|10100⟩` | 942/1000 — **94.2%** | 1000/1000 — 100% |
+| C(10,5) = 252 → `\|11111100⟩` | 903/1024 — **88.1%** | — |
+| C(15,5) = 3003 → 12-bit state | 837/1024 — **81.7%** | — |
 
-The 5.8% error on IBM is typical for current superconducting hardware. Next step: run on IonQ real hardware for a true apples-to-apples noise comparison.
+### Singmaster's Conjecture — Grover's search (IBM ibm_kingston)
 
-This is the beginning of a systematic study of Singmaster's Conjecture — searching Pascal's Triangle for numbers appearing 9+ times, using quantum hardware to probe larger search spaces than classical exhaustion.
+Singmaster's Conjecture asks whether any number appears 9+ times in Pascal's Triangle. We use Grover's search to find which rows contain a target value — the oracle marks those rows, Grover amplifies them above noise.
+
+| Experiment | Marked rows | Amplification | Depth | Result |
+|---|---|---|---|---|
+| Search for 6 | rows 4, 6 (C(4,2) and C(6,1)) | **4.11x** | 611 | ✅ |
+| Search for 3003, phase 1 | rows 14, 15 (C(14,6) and C(15,5)) | **3.0x** | 772 | ✅ |
+
+Both experiments succeeded on real superconducting hardware despite significant circuit depth. Amplification degrades predictably with depth — a useful noise benchmark in itself.
+
+Full experiment code and raw results: [singmasters-conjecture](https://github.com/Lokesh-2025/singmasters-conjecture) (private, collaboration with [Jack Woehr](https://github.com/jwoehr))
+
+Next: IonQ real hardware comparison once QPU access is confirmed.
 
 ---
 
@@ -289,9 +301,15 @@ quantum-hardware-mcp/
 - [x] Job polling (`/poll`), chat saving (`/save`), local model bypass (`/nolocal`)
 - [x] IBM multi-account config (instance, channel)
 - [x] Starlette SSE compatibility fix (works with all Starlette versions)
-- [ ] Pascal's Triangle / Singmaster's Conjecture experiment (IBM vs IonQ real hardware)
+- [x] Calibration drift alerts — auto-detects when device degrades >20%
+- [x] Reproducibility score — KL-divergence across N runs, 0-1 reliability score
+- [x] Credit-aware routing — estimates QPU minutes before submit, routes to cheapest backend
+- [x] Pascal's Triangle on real IBM hardware — 94.2% fidelity on ibm_kingston
+- [x] Singmaster's Conjecture — Grover's search on real IBM hardware — 4.11x amplification
+- [x] Published to MCP registries (Glama, mcp.so, PulseMCP)
+- [ ] IonQ real hardware experiments (QPU access pending)
+- [ ] Circuit fingerprinting — cache results, skip resubmitting identical circuits
 - [ ] `/load` — reload a saved chat session
-- [ ] Publish to MCP registries
 - [ ] Daily autonomous report agent
 
 ---
