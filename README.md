@@ -60,9 +60,9 @@ Each subagent is an expert for its platform  IBM subagent only sees IBM tools, I
 
 ---
 
-## Tools exposed
+## Tools exposed (25 total)
 
-### IBM Quantum tools
+### IBM Quantum tools (21)
 
 | Tool | What it does |
 |------|-------------|
@@ -81,14 +81,19 @@ Each subagent is an expert for its platform  IBM subagent only sees IBM tools, I
 | `run_grover` | Built-in Grover's search — builds the full circuit, picks the least-busy backend, submits |
 | `estimate_expectation` | Estimator primitive — computes ⟨ψ\|O\|ψ⟩ for Pauli observables (VQE, QAOA, quantum chemistry) |
 | `circuit_report` | Dry-run: transpiles your circuit and returns gate counts, qubit mapping, per-pair CX errors, estimated fidelity. No queue. |
-| `debug_circuit` | Pre-flight check — finds missing measurements, decoherence violations, qubit mismatches before you waste queue time. |
+| `debug_circuit` | Pre-flight check — finds missing measurements, decoherence violations, qubit mismatches before you waste queue time |
+| `get_alerts` | Fetch calibration drift alerts — notifies when a device error rate spikes >20% |
+| `start_repro_experiment` | Start a reproducibility experiment — run the same circuit N times and track variance |
+| `repro_score` | Get reproducibility score (0-1) for a completed experiment using KL-divergence |
+| `estimate_runtime` | Estimate QPU minutes + queue wait before submitting — avoid surprise costs |
+| `route_job` | Credit-aware routing — picks the cheapest backend that meets your error rate requirements |
 
-### IonQ tools
+### IonQ tools (4)
 
 | Tool | What it does |
 |------|-------------|
 | `ionq_devices` | List all IonQ quantum computers and simulators |
-| `ionq_submit_job` | Submit an OpenQASM 2.0 circuit to IonQ hardware or simulator |
+| `ionq_submit_job` | Submit an OpenQASM 2.0/3.0 circuit to IonQ hardware or simulator |
 | `ionq_job_status` | Check IonQ job status |
 | `ionq_job_results` | Retrieve measurement counts from a completed IonQ job |
 
