@@ -27,6 +27,8 @@ Tools:
   - get_alerts            : calibration drift alerts — devices that spiked or went offline
   - start_repro_experiment: submit same circuit N times to measure reproducibility
   - repro_score           : compute 0-1 reproducibility score after runs complete
+  - estimate_runtime      : estimate how many minutes a circuit will cost on a device
+  - route_job             : recommend the cheapest device that fits your circuit + time budget
 """
 
 import os
@@ -2240,6 +2242,201 @@ def repro_score(experiment_id: int) -> str:
                 "Score 0.7-0.9: mention variance in methods section. "
                 "Score <0.7: do not publish — rerun on a better-calibrated device."
             )
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _estimate_minutes(backend, qc, shots: int) -> dict:
+    """
+    Estimate how many minutes a circuit will cost on a backend.
+
+    Two components:
+    1. Queue wait  — pending_jobs × 30s average per job
+    2. Execution   — shots × circuit_depth × 1μs per gate layer
+    Both are rough but directionally correct for IBM Open Plan planning.
+    """
+    status = backend.status()
+    pending = status.pending_jobs or 0
+
+    try:
+        pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
+        isa = pm.run(qc)
+        depth = isa.depth()
+        n_qubits = isa.num_qubits
+    except Exception:
+        depth = qc.depth()
+        n_qubits = qc.num_qubits
+
+    queue_secs = pending * 30
+    exec_secs = (shots * depth * 1e-6) + 2  # +2s overhead per job
+    total_secs = queue_secs + exec_secs
+    total_mins = round(total_secs / 60, 2)
+
+    return {
+        "pending_jobs_in_queue": pending,
+        "circuit_depth_after_transpile": depth,
+        "num_qubits": n_qubits,
+        "queue_wait_estimate_mins": round(queue_secs / 60, 2),
+        "execution_estimate_mins": round(exec_secs / 60, 4),
+        "total_estimate_mins": total_mins,
+    }
+
+
+@mcp.tool()
+def estimate_runtime(
+    circuit: str,
+    backend_name: str,
+    shots: int = 1024,
+) -> str:
+    """
+    Estimate how many minutes a circuit will cost on an IBM device.
+
+    IBM Open Plan gives 180 minutes per year. This tool tells you how much
+    a specific circuit will cost BEFORE you submit — so you don't waste
+    your budget on the wrong backend or a busy queue.
+
+    Estimate includes:
+    - Queue wait time (based on current pending jobs × avg 30s per job)
+    - Execution time (based on transpiled circuit depth × shots)
+    - Total estimated cost in minutes
+
+    Args:
+        circuit      : OpenQASM 2.0 or 3.0 circuit string
+        backend_name : IBM device to estimate for (e.g. "ibm_fez")
+        shots        : number of shots (default 1024)
+
+    Returns estimated minutes broken down by queue wait vs execution.
+    """
+    try:
+        try:
+            qc = QuantumCircuit.from_qasm_str(circuit)
+        except Exception:
+            qc = qiskit_qasm3.loads(circuit)
+
+        service = _get_service()
+        backend = service.backend(backend_name)
+
+        est = _estimate_minutes(backend, qc, shots)
+        est["device"] = backend_name
+        est["shots"] = shots
+        est["note"] = (
+            "Queue wait is estimated at 30s/job (rough average). "
+            "Execution time is based on transpiled depth × shots. "
+            "IBM Open Plan budget: 180 min/year."
+        )
+
+        # Budget warning
+        if est["total_estimate_mins"] > 10:
+            est["warning"] = f"This job may cost ~{est['total_estimate_mins']} min — consider a shorter queue or fewer shots."
+
+        return json.dumps(est, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def route_job(
+    circuit: str,
+    shots: int = 1024,
+    max_minutes: float = 10.0,
+) -> str:
+    """
+    Recommend the best IBM device for your circuit based on cost and quality.
+
+    Checks all your accessible IBM devices and ranks them by:
+    1. Fits within max_minutes budget (queue + execution)
+    2. Lowest estimated total time
+    3. Lowest avg_cx_error (best fidelity)
+
+    This is credit-aware routing — it saves your IBM Open Plan minutes
+    for experiments that matter, not queue accidents.
+
+    Args:
+        circuit     : OpenQASM 2.0 or 3.0 circuit string
+        shots       : number of shots (default 1024)
+        max_minutes : reject devices that will cost more than this (default 10)
+
+    Returns ranked list of devices with cost estimate and recommendation.
+    """
+    try:
+        try:
+            qc = QuantumCircuit.from_qasm_str(circuit)
+        except Exception:
+            qc = qiskit_qasm3.loads(circuit)
+
+        required_qubits = qc.num_qubits
+        service = _get_service()
+        backends = service.backends(operational=True)
+
+        rankings = []
+        skipped = []
+
+        for backend in backends:
+            if backend.num_qubits < required_qubits:
+                skipped.append({
+                    "device": backend.name,
+                    "reason": f"only {backend.num_qubits} qubits, circuit needs {required_qubits}"
+                })
+                continue
+
+            try:
+                est = _estimate_minutes(backend, qc, shots)
+                total = est["total_estimate_mins"]
+
+                if total > max_minutes:
+                    skipped.append({
+                        "device": backend.name,
+                        "reason": f"estimated {total} min exceeds {max_minutes} min budget"
+                    })
+                    continue
+
+                # Get fidelity from latest snapshot
+                props = backend.properties()
+                cx_errors = []
+                if props:
+                    from snapshot import _two_qubit_errors
+                    try:
+                        cx_errors = _two_qubit_errors(props)
+                    except Exception:
+                        pass
+                avg_cx = round(sum(cx_errors) / len(cx_errors), 5) if cx_errors else None
+
+                rankings.append({
+                    "device": backend.name,
+                    "num_qubits": backend.num_qubits,
+                    "estimated_mins": total,
+                    "queue_wait_mins": est["queue_wait_estimate_mins"],
+                    "circuit_depth": est["circuit_depth_after_transpile"],
+                    "avg_cx_error": avg_cx,
+                })
+            except Exception as e:
+                skipped.append({"device": backend.name, "reason": str(e)})
+
+        # Sort: lowest time first, then lowest error
+        rankings.sort(key=lambda x: (x["estimated_mins"], x["avg_cx_error"] or 1))
+
+        if not rankings:
+            return json.dumps({
+                "error": "No devices fit within your budget or qubit requirements.",
+                "skipped": skipped,
+                "tip": f"Try increasing max_minutes (current: {max_minutes}) or simplifying your circuit."
+            }, indent=2)
+
+        recommendation = rankings[0]
+        return json.dumps({
+            "recommendation": recommendation["device"],
+            "reason": (
+                f"Lowest estimated cost ({recommendation['estimated_mins']} min) "
+                f"with avg_cx_error {recommendation['avg_cx_error']}"
+            ),
+            "ranked_devices": rankings,
+            "skipped_devices": skipped,
+            "circuit_requires_qubits": required_qubits,
+            "budget_max_minutes": max_minutes,
+            "ibm_open_plan_note": "IBM Open Plan: 180 min/year. Each minute counts."
         }, indent=2)
 
     except Exception as e:
