@@ -24,6 +24,9 @@ Tools:
   - ionq_submit_job       : submit an OpenQASM 2 circuit to IonQ hardware or simulator
   - ionq_job_status       : check the status of a submitted IonQ job
   - ionq_job_results      : retrieve measurement counts from a completed IonQ job
+  - get_alerts            : calibration drift alerts — devices that spiked or went offline
+  - start_repro_experiment: submit same circuit N times to measure reproducibility
+  - repro_score           : compute 0-1 reproducibility score after runs complete
 """
 
 import os
@@ -86,6 +89,31 @@ def _init_db() -> None:
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_name_ts
             ON device_snapshots (name, ts)
+        """)
+        # Reproducibility experiments — one row per experiment
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS repro_experiments (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_ts  TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                circuit     TEXT NOT NULL,
+                n_runs      INTEGER NOT NULL,
+                shots       INTEGER NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'pending'
+            )
+        """)
+        # One row per individual run within an experiment
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS repro_runs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment_id INTEGER NOT NULL REFERENCES repro_experiments(id),
+                run_index     INTEGER NOT NULL,
+                submitted_ts  TEXT NOT NULL,
+                job_id        TEXT,
+                status        TEXT NOT NULL DEFAULT 'submitted',
+                counts        TEXT,           -- JSON string of bit-string counts
+                calibration_epoch TEXT        -- avg_cx_error snapshot at submission time
+            )
         """)
 
 
@@ -1966,6 +1994,252 @@ def get_alerts(device_name: str = "", days: int = 7) -> str:
             "alerts": alerts,
             "total": len(alerts),
             "period_days": days,
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def start_repro_experiment(
+    circuit: str,
+    backend_name: str,
+    n_runs: int = 5,
+    shots: int = 1024,
+) -> str:
+    """
+    Submit the same circuit N times to measure reproducibility on real hardware.
+
+    NISQ hardware results vary between runs due to calibration drift and noise.
+    This tool submits identical circuits N times, storing each job ID so you
+    can later call repro_score() to compute the reproducibility score.
+
+    Args:
+        circuit      : OpenQASM 2.0 or 3.0 circuit string
+        backend_name : IBM device to run on (e.g. "ibm_fez")
+        n_runs       : how many times to run the same circuit (default 5)
+        shots        : shots per run (default 1024)
+
+    Returns an experiment_id. Use repro_score(experiment_id) after all
+    jobs complete to get the variance analysis and 0-1 reproducibility score.
+    """
+    try:
+        service = _get_service()
+        backend = service.backend(backend_name)
+
+        # Parse circuit
+        try:
+            qc = QuantumCircuit.from_qasm_str(circuit)
+        except Exception:
+            try:
+                qc = qiskit_qasm3.loads(circuit)
+            except Exception as e:
+                return json.dumps({"error": f"Could not parse circuit: {e}"})
+
+        # Transpile once, reuse for all runs
+        pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
+        isa_circuit = pm.run(qc)
+
+        # Get current calibration epoch for drift tracking
+        props = backend.properties()
+        cx_errors = []
+        if props:
+            from snapshot import _two_qubit_errors
+            try:
+                cx_errors = _two_qubit_errors(props)
+            except Exception:
+                pass
+        calibration_epoch = round(sum(cx_errors) / len(cx_errors), 5) if cx_errors else None
+
+        ts = datetime.now(timezone.utc).isoformat()
+
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.execute("""
+                INSERT INTO repro_experiments (created_ts, device_name, circuit, n_runs, shots, status)
+                VALUES (?, ?, ?, ?, ?, 'running')
+            """, (ts, backend_name, circuit, n_runs, shots))
+            experiment_id = cur.lastrowid
+
+            sampler = Sampler(backend)
+            job_ids = []
+            for i in range(n_runs):
+                job = sampler.run([isa_circuit], shots=shots)
+                job_id = job.job_id()
+                job_ids.append(job_id)
+                con.execute("""
+                    INSERT INTO repro_runs
+                        (experiment_id, run_index, submitted_ts, job_id, status, calibration_epoch)
+                    VALUES (?, ?, ?, ?, 'submitted', ?)
+                """, (experiment_id, i, datetime.now(timezone.utc).isoformat(), job_id,
+                      str(calibration_epoch) if calibration_epoch else None))
+
+        return json.dumps({
+            "experiment_id": experiment_id,
+            "device": backend_name,
+            "n_runs": n_runs,
+            "shots": shots,
+            "job_ids": job_ids,
+            "calibration_epoch": calibration_epoch,
+            "message": f"Submitted {n_runs} jobs. Call repro_score({experiment_id}) after they complete.",
+            "hint": "Use job_status(job_id) to check individual jobs."
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def repro_score(experiment_id: int) -> str:
+    """
+    Compute the reproducibility score for a completed repeat experiment.
+
+    Fetches results for all runs in the experiment, computes:
+    - Mean output distribution across all runs
+    - KL-divergence of each run from the mean (variance signal)
+    - Reproducibility score 0.0 to 1.0 (1.0 = identical results every run)
+    - Flag if calibration epoch changed between any two runs
+
+    A score above 0.9 means your result is likely real signal.
+    A score below 0.7 means the result is probably noise-driven — rerun later.
+
+    Args:
+        experiment_id : the ID returned by start_repro_experiment()
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            exp = con.execute("""
+                SELECT device_name, circuit, n_runs, shots, created_ts
+                FROM repro_experiments WHERE id = ?
+            """, (experiment_id,)).fetchone()
+
+            if not exp:
+                return json.dumps({"error": f"Experiment {experiment_id} not found."})
+
+            device_name, circuit, n_runs, shots, created_ts = exp
+
+            runs = con.execute("""
+                SELECT run_index, job_id, status, counts, calibration_epoch
+                FROM repro_runs WHERE experiment_id = ?
+                ORDER BY run_index
+            """, (experiment_id,)).fetchall()
+
+        # Fetch any pending results from IBM
+        service = _get_service()
+        all_counts = []
+        pending = []
+        epochs = set()
+
+        for run_index, job_id, status, counts_str, epoch in runs:
+            if epoch:
+                epochs.add(epoch)
+            if counts_str:
+                all_counts.append(json.loads(counts_str))
+                continue
+            if not job_id:
+                pending.append(run_index)
+                continue
+            try:
+                job = service.job(job_id)
+                jstatus = job.status()
+                if str(jstatus) in ("JobStatus.DONE", "DONE", "done"):
+                    result = job.result()
+                    pub_result = result[0]
+                    bitarray = pub_result.data
+                    field = list(vars(bitarray).keys())[0] if vars(bitarray) else None
+                    if field:
+                        counts = getattr(bitarray, field).get_counts()
+                    else:
+                        counts = {}
+                    counts_json = json.dumps(counts)
+                    with sqlite3.connect(DB_PATH) as con:
+                        con.execute("""
+                            UPDATE repro_runs SET status='done', counts=?
+                            WHERE experiment_id=? AND run_index=?
+                        """, (counts_json, experiment_id, run_index))
+                    all_counts.append(counts)
+                else:
+                    pending.append(run_index)
+            except Exception as e:
+                pending.append(run_index)
+
+        if pending:
+            return json.dumps({
+                "experiment_id": experiment_id,
+                "device": device_name,
+                "status": "incomplete",
+                "completed_runs": len(all_counts),
+                "pending_runs": pending,
+                "message": f"{len(pending)} run(s) still pending. Check with job_status() and retry repro_score()."
+            }, indent=2)
+
+        # --- Compute reproducibility score ---
+
+        # Gather all unique bitstrings across all runs
+        all_keys = set()
+        for c in all_counts:
+            all_keys.update(c.keys())
+
+        # Normalize each run into a probability distribution
+        dists = []
+        for c in all_counts:
+            total = sum(c.values()) or 1
+            dists.append({k: c.get(k, 0) / total for k in all_keys})
+
+        # Mean distribution
+        mean_dist = {k: sum(d[k] for d in dists) / len(dists) for k in all_keys}
+
+        # KL divergence: D_KL(P || Q) = sum(P * log(P/Q))
+        eps = 1e-10
+        kl_divs = []
+        for d in dists:
+            kl = sum(
+                d[k] * math.log((d[k] + eps) / (mean_dist[k] + eps))
+                for k in all_keys if d[k] > 0
+            )
+            kl_divs.append(round(kl, 6))
+
+        avg_kl = sum(kl_divs) / len(kl_divs)
+
+        # Score: 1.0 = perfect reproducibility, 0.0 = completely random
+        # KL of 0 → score 1.0, KL of 0.5+ → score ~0.0
+        score = round(max(0.0, 1.0 - (avg_kl / 0.5)), 3)
+
+        # Top bitstring and its mean probability
+        top_bitstring = max(mean_dist, key=mean_dist.get)
+        top_prob = round(mean_dist[top_bitstring], 4)
+
+        # Calibration drift flag
+        calibration_drifted = len(epochs) > 1
+
+        # Mark experiment complete
+        with sqlite3.connect(DB_PATH) as con:
+            con.execute("UPDATE repro_experiments SET status='complete' WHERE id=?",
+                        (experiment_id,))
+
+        verdict = (
+            "RELIABLE — result is likely real signal" if score >= 0.9
+            else "MARGINAL — result may be partially noise-driven" if score >= 0.7
+            else "UNRELIABLE — result is likely noise, not signal"
+        )
+
+        return json.dumps({
+            "experiment_id": experiment_id,
+            "device": device_name,
+            "n_runs": len(all_counts),
+            "shots_per_run": shots,
+            "reproducibility_score": score,
+            "verdict": verdict,
+            "top_bitstring": top_bitstring,
+            "top_bitstring_mean_probability": top_prob,
+            "kl_divergences": kl_divs,
+            "avg_kl_divergence": round(avg_kl, 6),
+            "calibration_drifted_between_runs": calibration_drifted,
+            "calibration_epochs_seen": list(epochs),
+            "interpretation": (
+                "Score 0.9-1.0: publish with confidence. "
+                "Score 0.7-0.9: mention variance in methods section. "
+                "Score <0.7: do not publish — rerun on a better-calibrated device."
+            )
         }, indent=2)
 
     except Exception as e:
