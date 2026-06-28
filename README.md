@@ -1,178 +1,258 @@
 # Quantum Hardware MCP Server
 
-An open-source MCP server that gives AI assistants live access to real quantum computers  IBM Quantum and IonQ. Ask natural questions, submit circuits, compare hardware, and get results. No dashboard. No manual API calls.
+A production MCP server that gives AI assistants programmatic access to live quantum hardware — IBM Quantum and IonQ. Natural language in. Real quantum results out. No dashboards. No manual API calls.
 
-Built with [FastMCP](https://github.com/jlowin/fastmcp), [qiskit-ibm-runtime](https://github.com/Qiskit/qiskit-ibm-runtime), and [qiskit-ionq](https://github.com/Qiskit-Partners/qiskit-ionq).
+Built in collaboration with [Jack Woehr](https://github.com/jwoehr) — IBM Quantum veteran, Qiskit contributor.
 
-Collaboration: [Jack Woehr](https://github.com/jwoehr)  IBM Quantum veteran, Qiskit contributor.
+Listed on [Glama](https://glama.ai), [mcp.so](https://mcp.so), and [PulseMCP](https://pulsemcp.com).
 
 ---
 
-## What this is
+## Why this exists
 
-Quantum researchers spend hours on things that should take seconds:
-- Checking which device has the shortest queue
-- Finding the lowest error rate before submitting a circuit
-- Submitting to IBM, then repeating the same process on IonQ separately
-- Waiting for results, then pulling them manually
+Quantum researchers lose hours to operational overhead:
 
-This server gives your AI assistant a direct line to both IBM and IonQ hardware. You ask once. It handles both.
+- Manually checking which device has the lowest error rate today
+- Submitting the same circuit to IBM, then separately to IonQ, then comparing by hand
+- Losing reproducibility context between runs — "what was the CX error when I ran Figure 3?"
+- No pre-flight — wasting queue time on circuits that fail at transpile
+
+This server eliminates that overhead. Your AI assistant handles device selection, circuit validation, job submission, result retrieval, and cross-provider comparison through a single interface.
+
+---
+
+## System architecture
+
+```mermaid
+graph TD
+    User["User / AI Assistant"]
+
+    subgraph Control Plane
+        Dispatcher["Dispatcher\nagent-server.js\nRoutes IBM vs IonQ"]
+        IBMAgent["IBM Subagent\nibm-subagent.js"]
+        IonQAgent["IonQ Subagent\nionq-subagent.js"]
+    end
+
+    subgraph Execution Plane
+        MCP["MCP Server\nserver.py\n26 tools"]
+        IBMAPI["IBM Quantum API\nQiskit Runtime"]
+        IonQAPI["IonQ REST API"]
+    end
+
+    subgraph Observability Plane
+        Snapshot["snapshot.py\nRuns every 6h"]
+        DB["devices.db\nSQLite — local history"]
+        CSV["data/snapshots.csv\nPublic — GitHub Actions CI"]
+        Report["report.py\nDaily fleet report"]
+        Alerts["Calibration drift alerts\n>20% spike detection"]
+    end
+
+    User --> Dispatcher
+    Dispatcher --> IBMAgent
+    Dispatcher --> IonQAgent
+    IBMAgent --> MCP
+    IonQAgent --> MCP
+    MCP --> IBMAPI
+    MCP --> IonQAPI
+    Snapshot --> DB
+    Snapshot --> CSV
+    Snapshot --> Alerts
+    DB --> MCP
+    Report --> DB
+```
 
 ---
 
 ## How it works
 
-When you ask a question, here is the path it takes:
+**Step 1 — Request classification**
+The dispatcher reads your message and classifies it: IBM job, IonQ job, or cross-provider comparison. Each subagent sees only the tools for its provider — no accidental cross-wiring.
 
-```
-You (chat.js)
-    ↓ sends your question to
-Dispatcher (agent-server.js)
-    ↓ asks the LLM: "is this IBM or IonQ?"
-    ↓ routes to the right expert
-    ├── IBM Subagent (ibm-subagent.js)
-    │       ↓ connects to
-    │   MCP Server (server.py)
-    │       ↓ calls IBM Quantum API → returns real data
-    │
-    └── IonQ Subagent (ionq-subagent.js)
-            ↓ connects to
-        MCP Server (server.py)
-            ↓ calls IonQ API → returns real data
-```
+**Step 2 — Pre-flight validation**
+Before touching the queue, `debug_circuit` catches missing measurements, decoherence bound violations, and qubit count mismatches. `circuit_report` does a full dry-run transpile — gate counts, qubit mapping, per-pair CX error, estimated fidelity — all without submitting.
 
-Each subagent is an expert for its platform  IBM subagent only sees IBM tools, IonQ subagent only sees IonQ tools. The dispatcher routes automatically based on your question.
+**Step 3 — Credit-aware routing**
+`estimate_runtime` computes QPU minutes before submission. `route_job` ranks backends by cost × error rate and picks the cheapest option that meets your fidelity requirement.
+
+**Step 4 — Execution**
+`submit_job` compiles to the backend's native gate set (OpenQASM 2.0 or 3.0), submits, and returns a `job_id`. `job_status` and `job_results` close the loop.
+
+**Step 5 — Observability**
+Every 6 hours, `snapshot.py` records calibration state across all providers. Drift alerts fire when any metric spikes >20%. `repro_score` runs KL-divergence across N identical runs to quantify hardware reliability.
 
 ---
 
-## What each file does
+## Planes
 
-| File | Job |
-|------|-----|
-| `server.py` | The only file that touches real quantum hardware. All IBM + IonQ tools live here. |
-| `agent/agent-server.js` | The brain. Reads your question, classifies IBM or IonQ, spawns the right expert. |
-| `agent/chat.js` | Your terminal interface. Where you type questions and see answers. |
-| `agent/subagents/ibm-subagent.js` | IBM expert. Only knows IBM tools. |
-| `agent/subagents/ionq-subagent.js` | IonQ expert. Only knows IonQ tools. |
-| `agent/subagents/base-subagent.js` | Shared ReAct loop logic used by both subagents. |
-| `snapshot.py` | Runs every 6 hours. Records device stats to `devices.db` and `data/snapshots.csv`. |
-| `tests/test_dispatcher.py` | 9 hard tests covering routing accuracy, tool isolation, and end-to-end job submission. |
+### Control plane — routing and coordination
 
----
+| Component | Role |
+|-----------|------|
+| `agent-server.js` | Dispatcher: classifies request, spawns the right subagent |
+| `ibm-subagent.js` | IBM specialist — only exposes IBM tools to the LLM |
+| `ionq-subagent.js` | IonQ specialist — only exposes IonQ tools to the LLM |
+| `base-subagent.js` | Shared ReAct loop (observe → think → act) used by both |
 
-## Tools exposed (26 total)
+### Execution plane — quantum hardware interface
 
-### IBM Quantum tools (22)
+26 tools across IBM Quantum (22) and IonQ (4). All live in `server.py`.
+
+**IBM Quantum — device intelligence**
 
 | Tool | What it does |
 |------|-------------|
-| `list_devices` | All IBM quantum computers you can access + live status |
-| `get_device_details` | Deep info on one machine: error rates, T1/T2, queue depth |
-| `compare_devices` | Rank machines by CX error, queue depth, qubit count, or combined score |
-| `queue_status` | Current queue snapshot — pick the shortest wait |
-| `best_qubits` | Best n qubits on a machine right now, scored by calibration data |
-| `device_history` | Snapshots for one machine over the last N days |
-| `device_on_date` | Historical stats for any past date (for reproducibility in papers) |
-| `submit_job` | Compile and submit an OpenQASM 2.0 or 3.0 circuit — returns a `job_id` |
-| `job_status` | Check status: QUEUED / RUNNING / DONE / ERROR |
-| `job_results` | Retrieve bit-string measurement counts from a completed job |
+| `list_devices` | All accessible IBM backends with live operational status |
+| `get_device_details` | Per-qubit T1/T2, readout error, gate error, queue depth |
+| `compare_devices` | Rank by CX error, queue depth, qubit count, or combined score |
+| `queue_status` | Current queue snapshot across all backends |
+| `best_qubits` | Score and rank qubits on a device by calibration quality |
+| `device_history` | Calibration snapshots for a device over the last N days |
+| `device_on_date` | Exact calibration state on any past date — for paper reproducibility |
+
+**IBM Quantum — job lifecycle**
+
+| Tool | What it does |
+|------|-------------|
+| `submit_job` | Transpile and submit OpenQASM 2.0 or 3.0 — returns `job_id` |
+| `job_status` | QUEUED / RUNNING / DONE / ERROR |
+| `job_results` | Bit-string measurement counts from a completed job |
 | `cancel_job` | Cancel a queued or running job |
-| `list_jobs` | Your most recent jobs with status and backend |
-| `run_grover` | Built-in Grover's search — builds the full circuit, picks the least-busy backend, submits |
-| `run_vqe` | Variational Quantum Eigensolver — finds molecule ground state energy (H2 → chemical accuracy in ~60 iterations) |
-| `estimate_expectation` | Estimator primitive — computes ⟨ψ\|O\|ψ⟩ for Pauli observables (VQE, QAOA, quantum chemistry) |
-| `circuit_report` | Dry-run: transpiles your circuit and returns gate counts, qubit mapping, per-pair CX errors, estimated fidelity. No queue. |
-| `debug_circuit` | Pre-flight check — finds missing measurements, decoherence violations, qubit mismatches before you waste queue time |
-| `get_alerts` | Fetch calibration drift alerts — notifies when a device error rate spikes >20% |
-| `start_repro_experiment` | Start a reproducibility experiment — run the same circuit N times and track variance |
-| `repro_score` | Get reproducibility score (0-1) for a completed experiment using KL-divergence |
-| `estimate_runtime` | Estimate QPU minutes + queue wait before submitting — avoid surprise costs |
-| `route_job` | Credit-aware routing — picks the cheapest backend that meets your error rate requirements |
+| `list_jobs` | Recent jobs with status, backend, and timestamps |
 
-### IonQ tools (4)
+**IBM Quantum — pre-flight and cost control**
 
 | Tool | What it does |
 |------|-------------|
-| `ionq_devices` | List all IonQ quantum computers and simulators |
-| `ionq_submit_job` | Submit an OpenQASM 2.0/3.0 circuit to IonQ hardware or simulator |
-| `ionq_job_status` | Check IonQ job status |
-| `ionq_job_results` | Retrieve measurement counts from a completed IonQ job |
+| `debug_circuit` | Pre-submission check: missing measurements, decoherence violations, qubit mismatches |
+| `circuit_report` | Full dry-run: gate counts, qubit mapping, per-pair CX errors, estimated fidelity |
+| `estimate_runtime` | QPU minutes + queue wait estimate before you submit |
+| `route_job` | Credit-aware routing — cheapest backend that meets your error threshold |
+
+**IBM Quantum — algorithms and chemistry**
+
+| Tool | What it does |
+|------|-------------|
+| `run_grover` | Full Grover's search — builds oracle + diffusion, picks least-busy backend, submits |
+| `run_vqe` | Variational Quantum Eigensolver — H2 ground state to chemical accuracy (0.0 mHartree) in ~60 iterations |
+| `estimate_expectation` | Estimator primitive: computes ⟨ψ\|O\|ψ⟩ for Pauli observables (VQE, QAOA, quantum chemistry) |
+
+**IBM Quantum — observability**
+
+| Tool | What it does |
+|------|-------------|
+| `get_alerts` | Calibration drift alerts — spikes >20% in CX error or readout error |
+| `start_repro_experiment` | Run the same circuit N times, record variance across runs |
+| `repro_score` | KL-divergence reproducibility score (0 = identical, 1 = maximally different) |
+
+**IonQ**
+
+| Tool | What it does |
+|------|-------------|
+| `ionq_devices` | All IonQ backends and simulators with live status |
+| `ionq_submit_job` | Submit OpenQASM 2.0/3.0 to IonQ hardware or simulator |
+| `ionq_job_status` | Job status on IonQ |
+| `ionq_job_results` | Measurement counts from a completed IonQ job |
+
+### Observability plane — calibration history
+
+`snapshot.py` runs every 6 hours via GitHub Actions and a local LaunchAgent:
+
+- Collects IBM + IonQ + AWS Braket calibration data — CX error, readout error, T1/T2, queue depth
+- Locally: writes to `devices.db` (SQLite) — feeds `device_history`, `device_on_date`, drift alerts
+- CI: appends to `data/snapshots.csv` — public, committed to the repo, permanent record
+
+`report.py` generates a daily fleet summary at 8am — error trends, device rankings, alert history.
 
 ---
 
 ## Real experiments on quantum hardware
 
-### Pascal's Triangle encoding (IBM ibm_kingston)
+### Pascal's Triangle encoding — IBM ibm\_kingston
 
-Encode Pascal's Triangle values as binary quantum states and measure fidelity on real hardware.
+Binary-encode Pascal's Triangle values as quantum states, measure preparation fidelity on real superconducting hardware.
 
-| Circuit | IBM ibm_kingston | IonQ (simulator) |
-|---|---|---|
+| Circuit | IBM ibm_kingston | IonQ simulator |
+|---------|-----------------|----------------|
 | C(6,3) = 20 → `\|10100⟩` | 942/1000 — **94.2%** | 1000/1000 — 100% |
 | C(10,5) = 252 → `\|11111100⟩` | 903/1024 — **88.1%** | — |
 | C(15,5) = 3003 → 12-bit state | 837/1024 — **81.7%** | — |
 
-### Singmaster's Conjecture — Grover's search (IBM ibm_kingston)
+### Singmaster's Conjecture — Grover's search — IBM ibm\_kingston
 
-Singmaster's Conjecture asks whether any number appears 9+ times in Pascal's Triangle. We use Grover's search to find which rows contain a target value — the oracle marks those rows, Grover amplifies them above noise.
+Singmaster's Conjecture asks whether any integer appears 9+ times in Pascal's Triangle. We use Grover's search to amplify rows containing a target value above the noise floor.
 
-| Experiment | Marked rows | Amplification | Depth | Result |
-|---|---|---|---|---|
-| Search for 6 | rows 4, 6 (C(4,2) and C(6,1)) | **4.11x** | 611 | ✅ |
-| Search for 3003, phase 1 | rows 14, 15 (C(14,6) and C(15,5)) | **3.0x** | 772 | ✅ |
+| Experiment | Target | Marked rows | Amplification | Circuit depth | Result |
+|------------|--------|-------------|---------------|---------------|--------|
+| Phase 1 | 6 | rows 4, 6 | **4.11x** | 611 | ✅ |
+| Phase 2 | 3003 | rows 14, 15 | **3.0x** | 772 | ✅ |
 
-Both experiments succeeded on real superconducting hardware despite significant circuit depth. Amplification degrades predictably with depth — a useful noise benchmark in itself.
+Amplification degrades predictably with circuit depth — itself a useful noise characterization. Full code and raw results: [singmasters-conjecture](https://github.com/Lokesh-2025/singmasters-conjecture) (collaboration with [Jack Woehr](https://github.com/jwoehr)).
 
-Full experiment code and raw results: [singmasters-conjecture](https://github.com/Lokesh-2025/singmasters-conjecture) (private, collaboration with [Jack Woehr](https://github.com/jwoehr))
+### VQE — H2 molecule ground state energy
 
-Next: IonQ real hardware comparison once QPU access is confirmed.
+Variational Quantum Eigensolver on a 2-qubit hardware-efficient ansatz (RY + CNOT). COBYLA optimizer.
 
----
+| Backend | Iterations | VQE energy | Exact energy | Error |
+|---------|------------|-----------|--------------|-------|
+| Local simulator | 60 | −1.857275 Ha | −1.857275 Ha | **0.0 mHa** |
+| IBM real hardware | pending | — | −1.857275 Ha | — |
 
-## Chat commands
+Chemical accuracy threshold: < 1.6 mHa. Simulator achieves exact convergence. Real hardware run pending — IonQ trapped ions expected to outperform IBM superconducting due to lower gate error.
 
-| Command | What it does |
-|---------|-------------|
-| `/poll IBM <job_id> [interval]` | Poll an IBM job every N seconds until done, auto-stops on completion |
-| `/poll IonQ <job_id> [interval]` | Same for IonQ jobs |
-| `/save @/path/to/file` | Save your chat history to a Markdown file |
-| `/nolocal` | Toggle bypass of the local Qiskit code model (granite/mistral) — useful when Ollama is slow or unavailable |
-| `/clear` | Clear chat history |
-| `/help` | Show all commands |
-| `/exit` or `/quit` | End the session |
+This is a stepping stone toward receptor-ligand binding energy simulations for drug discovery research.
 
 ---
 
-## IBM account configuration
-
-Beyond the token, IBM Quantum supports multiple accounts and instances. Configure in `.env`:
+## Test suite
 
 ```bash
-# Pin a specific hub/group/project (leave unset for IBM auto-select)
-IBM_INSTANCE=ibm-q/open/main
+python tests/test_all_tools.py
+```
 
-# Platform: ibm_quantum_platform (default) or ibm_cloud
-IBM_CHANNEL=ibm_quantum_platform
+28 checks across all 26 tools. Read-only tools hit the real IBM and IonQ APIs. Write tools are tested against validation paths only — zero QPU credits spent.
 
-# Set false to hide account info from the server startup banner
-IBM_SHOW_ACCOUNT_INFO=true
+```
+Total: 28 checks | ✅ 28 passed | ❌ 0 failed | ⏭️  0 skipped
+All tools operational!
 ```
 
 ---
 
-## Prerequisites
+## Project structure
 
-- Python 3.10+
-- Node.js 18+
-- An IBM Quantum account (free) — [quantum.ibm.com](https://quantum.ibm.com)
-- An IonQ account (optional) — [cloud.ionq.com](https://cloud.ionq.com)
-- An LLM API key (Anthropic, Gemini, OpenAI, or local Ollama)
+```
+quantum-hardware-mcp/
+├── server.py                      # MCP server — all 26 IBM + IonQ tools
+├── snapshot.py                    # Multi-provider calibration snapshot agent
+├── report.py                      # Daily fleet report
+├── requirements.txt
+├── docker-compose.yml
+├── Dockerfile
+├── .env.example
+├── agent/
+│   ├── agent-server.js            # Dispatcher — control plane router
+│   ├── chat.js                    # Terminal interface
+│   ├── subagents/
+│   │   ├── base-subagent.js       # Shared ReAct loop
+│   │   ├── ibm-subagent.js        # IBM specialist
+│   │   └── ionq-subagent.js       # IonQ specialist
+├── experiments/
+│   ├── singmasters_grover.py      # Grover's search for Singmaster's Conjecture
+│   ├── singmasters_3003.py        # Phase 2 — 3003 in Pascal's Triangle
+│   └── vqe_h2.py                  # VQE for H2 molecule ground state
+├── tests/
+│   └── test_all_tools.py          # 28-check smoke test suite
+├── data/
+│   └── snapshots.csv              # Public calibration history (updated by CI)
+└── .github/workflows/
+    └── snapshot.yml               # GitHub Actions: snapshot every 6h
+```
 
 ---
 
 ## Quick start
 
-### 1. Clone and install
+**Prerequisites:** Python 3.10+, Node.js 18+, IBM Quantum account (free), LLM API key.
 
 ```bash
 git clone https://github.com/Lokesh-2025/quantum-hardware-mcp.git
@@ -180,69 +260,16 @@ cd quantum-hardware-mcp
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cd agent && npm install && cd ..
+cp .env.example .env        # add IBM token + LLM key
+docker compose up --build   # starts MCP server + agent
+node agent/chat.js          # open terminal chat
 ```
-
-### 2. Configure
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` — add your IBM token and LLM key. IonQ key is optional.
-
-> `.env` is in `.gitignore` — it will never be committed.
-
-### 3. Run with Docker (recommended)
-
-```bash
-docker compose up --build
-```
-
-Then in a separate terminal:
-
-```bash
-node agent/chat.js
-```
-
-### 4. Or run manually
-
-Terminal 1 — MCP server:
-```bash
-source .venv/bin/activate
-python3 server.py --transport http
-```
-
-Terminal 2 — agent:
-```bash
-cd agent && node agent-server.js
-```
-
-Terminal 3 — chat:
-```bash
-cd agent && node chat.js
-```
-
----
-
-## LLM provider support
-
-Not locked into any provider:
-
-| Provider | Cost | Config |
-|----------|------|--------|
-| Anthropic (Claude) | Paid | `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` |
-| Google Gemini | Free tier | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` |
-| Ollama | Free, local | `LLM_PROVIDER=ollama` + `OLLAMA_MODEL` |
-| OpenAI | Paid | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
-| vLLM | Self-hosted | `LLM_PROVIDER=vllm` + `VLLM_BASE_URL` |
-
-> **Privacy note:** For sensitive research — pharmaceutical, government, or unpublished academic work — run fully offline with Ollama. Zero data leaves your machine. The LLM runs locally, and the MCP server only contacts IBM/IonQ when you explicitly submit a job.
 
 ---
 
 ## Connect to Claude Desktop
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -255,68 +282,43 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The hammer icon will show all quantum tools.
+Restart Claude Desktop. All 26 tools appear under the hammer icon.
 
 ---
 
-## Automatic snapshots
+## LLM provider support
 
-`snapshot.py` records device stats every 6 hours:
-- **Locally** — writes to `devices.db`, feeds `device_history` and `device_on_date`
-- **GitHub Actions** — appends to `data/snapshots.csv` every 6 hours, building a public historical record
+| Provider | Cost | Env var |
+|----------|------|---------|
+| Anthropic Claude | Paid | `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY` |
+| Google Gemini | Free tier | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` |
+| OpenAI | Paid | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
+| Ollama | Free, local | `LLM_PROVIDER=ollama` + `OLLAMA_MODEL` |
+| vLLM | Self-hosted | `LLM_PROVIDER=vllm` + `VLLM_BASE_URL` |
 
-If a reviewer asks "what was the CX error on the day you ran Figure 3?" — you can answer exactly.
-
----
-
-## Project structure
-
-```
-quantum-hardware-mcp/
-├── server.py                    # MCP server — all IBM + IonQ tools
-├── snapshot.py                  # Background device snapshot agent
-├── report.py                    # Daily fleet report (runs at 8am)
-├── requirements.txt
-├── .env.example
-├── docker-compose.yml
-├── Dockerfile
-├── agent/
-│   ├── agent-server.js          # Dispatcher — routes IBM vs IonQ
-│   ├── chat.js                  # Terminal chat interface
-│   ├── Dockerfile
-│   ├── subagents/
-│   │   ├── base-subagent.js     # Shared ReAct loop logic
-│   │   ├── ibm-subagent.js      # IBM specialist
-│   │   └── ionq-subagent.js     # IonQ specialist
-│   └── .env.example
-├── tests/
-│   └── test_dispatcher.py       # 9 dispatcher tests (routing, isolation, E2E)
-├── data/
-│   └── snapshots.csv            # Historical device data (public, updated by CI)
-└── .github/workflows/
-    └── snapshot.yml             # GitHub Actions: snapshot every 6h
-```
+For sensitive research (pharmaceutical, unpublished academic work): run Ollama locally. The LLM never leaves your machine. The MCP server only contacts IBM/IonQ when you explicitly submit a job.
 
 ---
 
 ## Roadmap
 
-- [x] IBM Quantum tools (list, compare, submit, results)
-- [x] IonQ support
-- [x] Subordinate agent architecture (dispatcher → IBM/IonQ experts)
-- [x] Job polling (`/poll`), chat saving (`/save`), local model bypass (`/nolocal`)
-- [x] IBM multi-account config (instance, channel)
-- [x] Starlette SSE compatibility fix (works with all Starlette versions)
-- [x] Calibration drift alerts — auto-detects when device degrades >20%
-- [x] Reproducibility score — KL-divergence across N runs, 0-1 reliability score
-- [x] Credit-aware routing — estimates QPU minutes before submit, routes to cheapest backend
-- [x] Pascal's Triangle on real IBM hardware — 94.2% fidelity on ibm_kingston
-- [x] Singmaster's Conjecture — Grover's search on real IBM hardware — 4.11x amplification
-- [x] Published to MCP registries (Glama, mcp.so, PulseMCP)
+- [x] IBM Quantum tools — device intelligence, job lifecycle, pre-flight, routing
+- [x] IonQ support — devices, submit, status, results
+- [x] Multi-agent control plane — dispatcher + IBM/IonQ specialist subagents
+- [x] Calibration drift alerts — auto-detects >20% error spikes
+- [x] Reproducibility scoring — KL-divergence across N runs
+- [x] Credit-aware routing — QPU cost estimation before submit
+- [x] Pascal's Triangle on real IBM hardware — 94.2% fidelity
+- [x] Singmaster's Conjecture — Grover's search — 4.11x amplification on real hardware
+- [x] VQE for H2 — chemical accuracy (0.0 mHartree) on simulator
+- [x] Multi-provider snapshot pipeline — IBM + IonQ + AWS Braket, every 6h
+- [x] Full smoke test suite — 28/28 passing, zero QPU credits spent
+- [x] Listed on Glama, mcp.so, PulseMCP
 - [ ] IonQ real hardware experiments (QPU access pending)
+- [ ] VQE on real IBM hardware — H2 hardware result
 - [ ] Circuit fingerprinting — cache results, skip resubmitting identical circuits
-- [ ] `/load` — reload a saved chat session
-- [ ] Daily autonomous report agent
+- [ ] Smart routing brain — cross-provider ML recommendations (needs 60+ days of data)
+- [ ] Autonomous daily report agent
 
 ---
 
