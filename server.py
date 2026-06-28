@@ -1146,7 +1146,188 @@ def run_grover(n_qubits: int, target_state: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Tool 14: estimate_expectation
+# Tool 14: run_vqe
+# --------------------------------------------------------------------------
+
+@mcp.tool()
+def run_vqe(molecule: str = "H2", backend_name: str = "simulator",
+            max_iterations: int = 150) -> str:
+    """
+    Run the Variational Quantum Eigensolver (VQE) to find the ground state
+    energy of a molecule.
+
+    VQE is the core quantum chemistry algorithm. It finds the lowest energy
+    configuration of a molecule by iterating: prepare a quantum state →
+    measure its energy → classically adjust circuit parameters → repeat
+    until the energy converges.
+
+    This is the first step toward simulating receptor-ligand binding energies
+    for drug discovery research.
+
+    Args:
+        molecule:       Molecule to simulate. Currently supports "H2".
+                        H2 is the standard benchmark — ground state = -1.857275 Hartree.
+        backend_name:   "simulator" (free, runs locally) or an IBM backend name
+                        like "ibm_fez" (costs QPU minutes). Default: "simulator".
+        max_iterations: Max COBYLA optimizer iterations (default 150).
+                        More iterations = more accurate but slower.
+
+    Returns JSON with:
+      - molecule        Molecule simulated
+      - vqe_energy      Found ground state energy in Hartree
+      - exact_energy    Known exact value (for comparison)
+      - error_hartree   Absolute error
+      - error_mhartree  Error in milli-Hartree (chemical accuracy = < 1.6 mHa)
+      - converged       Whether optimizer converged
+      - iterations      Number of optimizer iterations used
+      - backend         Where it ran (simulator or IBM device)
+      - optimal_params  Best circuit parameters found
+      - job_id          IBM job ID (only when backend_name is a real device)
+      - note            Plain-English interpretation
+    """
+    import numpy as np
+    from scipy.optimize import minimize
+    from qiskit.quantum_info import SparsePauliOp as _SparsePauliOp
+
+    # ── Molecule definitions ─────────────────────────────────────────────────
+    # Each molecule: (Hamiltonian terms, exact ground state energy in Hartree)
+    MOLECULES = {
+        "H2": (
+            [("II", -1.0523732), ("IZ", 0.39793742), ("ZI", -0.39793742),
+             ("ZZ", -0.01128010), ("XX", 0.18093119)],
+            -1.857275,  # electronic ground state (this Hamiltonian, STO-3G basis)
+        ),
+    }
+
+    mol = molecule.upper()
+    if mol not in MOLECULES:
+        return json.dumps({
+            "error": f"Molecule '{molecule}' not supported. Currently available: {list(MOLECULES.keys())}",
+            "note": "H2 is the standard benchmark. More molecules (LiH, BeH2) coming soon."
+        })
+
+    pauli_terms, exact_energy = MOLECULES[mol]
+    hamiltonian = _SparsePauliOp.from_list(pauli_terms)
+    n_qubits = len(pauli_terms[0][0])  # length of "II" = 2
+
+    # ── Ansatz: hardware-efficient (RY + CNOT) ───────────────────────────────
+    def build_ansatz(params):
+        qc = QuantumCircuit(n_qubits)
+        qc.ry(params[0], 0)
+        qc.ry(params[1], 1)
+        qc.cx(0, 1)
+        qc.ry(params[2], 0)
+        qc.ry(params[3], 1)
+        return qc
+
+    # ── Simulator path (free) ────────────────────────────────────────────────
+    if backend_name == "simulator":
+        from qiskit.primitives import StatevectorEstimator as _SVEstimator
+
+        estimator = _SVEstimator()
+        iteration_count = [0]
+
+        def cost_fn(params):
+            qc = build_ansatz(params)
+            result = estimator.run([(qc, hamiltonian)]).result()
+            iteration_count[0] += 1
+            return result[0].data.evs.real
+
+        rng = np.random.default_rng(42)
+        x0 = rng.uniform(-np.pi, np.pi, 4)
+        result = minimize(cost_fn, x0, method="COBYLA",
+                          options={"maxiter": max_iterations, "rhobeg": 0.5})
+
+        vqe_energy = float(result.fun)
+        error = abs(vqe_energy - exact_energy)
+        error_mha = error * 1000
+
+        if error_mha < 1.6:
+            interp = "Chemical accuracy achieved — error < 1.6 mHartree. The quantum computer found the true ground state."
+        elif error_mha < 10:
+            interp = "Near chemical accuracy. Good result for this ansatz."
+        else:
+            interp = "Did not reach chemical accuracy. Try more iterations or a deeper ansatz."
+
+        return json.dumps({
+            "molecule": mol,
+            "backend": "local StatevectorSimulator (free)",
+            "vqe_energy": round(vqe_energy, 6),
+            "exact_energy": exact_energy,
+            "error_hartree": round(error, 6),
+            "error_mhartree": round(error_mha, 3),
+            "converged": bool(result.success),
+            "iterations": iteration_count[0],
+            "optimal_params": [round(float(p), 4) for p in result.x],
+            "job_id": None,
+            "note": interp,
+            "next_step": (
+                f"To run on real IBM hardware: run_vqe(molecule='{mol}', backend_name='ibm_fez'). "
+                "Hardware noise will push the energy slightly above the exact value — "
+                "IonQ trapped ions would give the cleanest result."
+            ),
+        }, indent=2)
+
+    # ── Real IBM hardware path (costs QPU minutes) ───────────────────────────
+    # Strategy: first find optimal params on simulator (free), then evaluate
+    # the single optimal circuit on real hardware (1 job, minimal cost).
+    from qiskit.primitives import StatevectorEstimator as _SVEstimator2
+    from qiskit_ibm_runtime import EstimatorV2 as _IBMEstimator
+
+    # Step 1: find optimal params on simulator for free
+    estimator_sim = _SVEstimator2()
+    iter_sim = [0]
+
+    def cost_sim(params):
+        qc = build_ansatz(params)
+        result = estimator_sim.run([(qc, hamiltonian)]).result()
+        iter_sim[0] += 1
+        return result[0].data.evs.real
+
+    rng = np.random.default_rng(42)
+    x0 = rng.uniform(-np.pi, np.pi, 4)
+    sim_result = minimize(cost_sim, x0, method="COBYLA",
+                          options={"maxiter": max_iterations, "rhobeg": 0.5})
+    optimal_params = sim_result.x
+    sim_energy = float(sim_result.fun)
+
+    # Step 2: evaluate optimal circuit once on real hardware
+    service = _get_service()
+    try:
+        backend = service.backend(backend_name)
+    except Exception as e:
+        return json.dumps({"error": f"Backend '{backend_name}' not found: {e}"})
+
+    qc = build_ansatz(optimal_params)
+    pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
+    isa_circuit = pm.run(qc)
+    isa_hamiltonian = hamiltonian.apply_layout(isa_circuit.layout)
+
+    hw_estimator = _IBMEstimator(backend)
+    try:
+        job = hw_estimator.run([(isa_circuit, isa_hamiltonian)])
+    except Exception as e:
+        return json.dumps({"error": f"IBM hardware submission failed: {e}"})
+
+    return json.dumps({
+        "molecule": mol,
+        "backend": backend_name,
+        "simulator_energy": round(sim_energy, 6),
+        "exact_energy": exact_energy,
+        "simulator_iterations": iter_sim[0],
+        "optimal_params": [round(float(p), 4) for p in optimal_params],
+        "job_id": job.job_id(),
+        "status": str(job.status()),
+        "note": (
+            f"Simulator found optimal parameters (energy={sim_energy:.6f} Hartree). "
+            f"Now evaluating on {backend_name} real hardware. "
+            f"Use job_status to track, then job_results to retrieve the hardware energy."
+        ),
+    }, indent=2)
+
+
+# --------------------------------------------------------------------------
+# Tool 15: estimate_expectation
 # --------------------------------------------------------------------------
 
 @mcp.tool()
