@@ -60,9 +60,9 @@ Each subagent is an expert for its platform  IBM subagent only sees IBM tools, I
 
 ---
 
-## Tools exposed (25 total)
+## Tools exposed (26 total)
 
-### IBM Quantum tools (21)
+### IBM Quantum tools (22)
 
 | Tool | What it does |
 |------|-------------|
@@ -79,6 +79,7 @@ Each subagent is an expert for its platform  IBM subagent only sees IBM tools, I
 | `cancel_job` | Cancel a queued or running job |
 | `list_jobs` | Your most recent jobs with status and backend |
 | `run_grover` | Built-in Grover's search — builds the full circuit, picks the least-busy backend, submits |
+| `run_vqe` | Variational Quantum Eigensolver — finds molecule ground state energy (H2 → chemical accuracy in ~60 iterations) |
 | `estimate_expectation` | Estimator primitive — computes ⟨ψ\|O\|ψ⟩ for Pauli observables (VQE, QAOA, quantum chemistry) |
 | `circuit_report` | Dry-run: transpiles your circuit and returns gate counts, qubit mapping, per-pair CX errors, estimated fidelity. No queue. |
 | `debug_circuit` | Pre-flight check — finds missing measurements, decoherence violations, qubit mismatches before you waste queue time |
