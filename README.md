@@ -319,6 +319,7 @@ For sensitive research (pharmaceutical, unpublished academic work): run Ollama l
 - [ ] Circuit fingerprinting — cache results, skip resubmitting identical circuits
 - [ ] Smart routing brain — cross-provider ML recommendations (needs 60+ days of data)
 - [ ] Autonomous daily report agent
+- [ ] Circuit image understanding — accept a circuit diagram image as input, interpret and submit (inspired by [quantum-assistant](https://github.com/samuellimabraz/quantum-assistant) which fine-tunes VLMs on quantum visuals) — **ask Jack on Monday**
 
 ---
 
